@@ -19,26 +19,40 @@ Augmenting **LeWorldModel** (LeWM) with calibrated uncertainty — for OOD detec
   2. **Uncertainty-aware CEM:** score plans by `dist-to-goal + β·(rollout uncertainty)` and compare success rate vs vanilla CEM. The derived uncertainty needs no retrain.
 - **M2 — heavy (retrain, needs the 13 GB + sims).** Stochastic LeWM: predictor outputs `(μ, σ)`; loss `KL(posterior‖prior) + λ·SIGReg` (Dreamer ELBO with SIGReg replacing reconstruction). Proper predictive uncertainty → uncertainty-aware planning, benchmarked vs M1's derived signal and vs vanilla.
 
-## Colab — Milestone 0
+## Colab — Milestone 0  (GPU runtime; run cell by cell, absolute `/content` paths)
 
-```bash
-# 1. deps (transformers 4.x is REQUIRED — 5.x silently loads the ViT as random)
+```python
+# Cell 1 — deps. transformers 4.x is REQUIRED (5.x silently loads the ViT as random).
 !pip install -q "stable-worldmodel[train,env]" stable-pretraining "transformers==4.49.0"
-
-# 2. code
-!git clone -q https://github.com/lucas-maes/le-wm.git
-!git clone -q https://github.com/GhostOfRazgriz1/lewm-uncertainty.git
-
-# 3. sanity: load the pretrained model + run a forward pass (no env needed)
-%cd lewm-uncertainty
-!python -c "from src.load_lewm import load_lewm; m,c=load_lewm('../le-wm'); print('loaded', sum(p.numel() for p in m.parameters())/1e6,'M params')"
-
-# 4. convert HF checkpoint -> the _object.ckpt eval.py expects, then run the planning eval
-#    (see le-wm/README 'Loading a checkpoint' + 'Planning'; eval uses the env, not the 13GB dataset)
-%cd ../le-wm
-# export STABLEWM_HOME=/content/stablewm ; hf download quentinll/lewm-pusht ... ; convert ; 
-!python eval.py --config-name=pusht.yaml policy=pusht/lewm
 ```
+```python
+# Cell 2 — code (rm first so a re-run from a failed clone is clean)
+!cd /content && rm -rf le-wm lewm-uncertainty \
+ && git clone -q https://github.com/lucas-maes/le-wm.git \
+ && git clone -q https://github.com/GhostOfRazgriz1/lewm-uncertainty.git && ls /content
+```
+```python
+# Cell 3 — VALIDATED step: load the pretrained LeWM on GPU (no env needed).
+import sys; sys.path.insert(0, "/content/lewm-uncertainty")
+from src.load_lewm import load_lewm
+model, cfg = load_lewm("/content/le-wm", device="cuda")
+print("LeWM loaded:", sum(p.numel() for p in model.parameters()) / 1e6, "M params")
+```
+```python
+# Cell 4 — convert to the _object.ckpt eval.py expects (uses the model from Cell 3)
+import os, torch
+os.environ["STABLEWM_HOME"] = "/content/stablewm"
+out = "/content/stablewm/pusht/lewm_object.ckpt"
+os.makedirs(os.path.dirname(out), exist_ok=True)
+torch.save(model.cpu(), out); print("saved", out)
+```
+```python
+# Cell 5 — Push-T planning eval (needs the env; NOT the 13GB dataset). Report the planner output + any error.
+%cd /content/le-wm
+!STABLEWM_HOME=/content/stablewm python eval.py --config-name=pusht.yaml policy=pusht/lewm
+```
+
+Cell 3 should print ~18M params (the validated loader). Cells 4–5 are the parts to debug from their output — paste back errors and the planner trace.
 
 If M0's success rate reproduces the paper (~the bar charts in their gif), the infra is good and M1 is unblocked.
 
