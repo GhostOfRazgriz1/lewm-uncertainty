@@ -27,7 +27,7 @@ Augmenting **LeWorldModel** (LeWM) with calibrated uncertainty — for OOD detec
 
 # 2. code
 !git clone -q https://github.com/lucas-maes/le-wm.git
-!git clone -q https://github.com/<you>/lewm-uncertainty.git
+!git clone -q https://github.com/GhostOfRazgriz1/lewm-uncertainty.git
 
 # 3. sanity: load the pretrained model + run a forward pass (no env needed)
 %cd lewm-uncertainty
