@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LeWM uncertainty as a runtime monitor</title>
+<style>
+ :root{--bg:#0e1116;--panel:#161b22;--line:#30363d;--ink:#e6edf3;--mut:#8b949e;
+   --blue:#2980b9;--orange:#e67e22;--purple:#8e44ad;--green:#27ae60;--gray:#6e7681;}
+ *{box-sizing:border-box} body{background:var(--bg);color:var(--ink);font:14px/1.6 system-ui,sans-serif;margin:0;padding:28px;}
+ .wrap{max-width:960px;margin:0 auto;}
+ h1{font-size:23px;margin:0 0 4px;} h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:26px 0 10px;border-bottom:1px solid var(--line);padding-bottom:6px;}
+ .sub{color:var(--mut);margin:0 0 18px;font-size:15px;}
+ .thesis{background:linear-gradient(90deg,#11261a,#161b22);border:1px solid #2ea04340;border-left:3px solid var(--green);border-radius:8px;padding:14px 16px;margin:6px 0 8px;font-size:15px;}
+ .thesis b{color:#56d364;}
+ .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;} @media(max-width:760px){.grid{grid-template-columns:1fr;}}
+ .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;}
+ .panel h3{margin:0 0 2px;font-size:14px;} .panel .cap{color:var(--mut);font-size:12px;margin:0 0 12px;}
+ code{background:#1f2630;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12.5px;color:#c9d6e3;}
+ .sig{font-weight:600} .b{color:var(--blue)} .o{color:var(--orange)} .p{color:var(--purple)} .g{color:var(--green)} .r{color:var(--mut)}
+ ul{margin:8px 0 0;padding-left:18px;} li{margin:4px 0;}
+ table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px;}
+ th,td{text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);} th:first-child,td:first-child{text-align:left;}
+ th{color:var(--mut);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;}
+ .win{color:#56d364;font-weight:600} .lose{color:#f0826d}
+ .foot{color:var(--mut);font-size:12px;margin-top:24px;border-top:1px solid var(--line);padding-top:12px;}
+ .leg{font-size:11.5px;color:var(--mut);margin-top:8px;}
+ .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin:0 4px 0 10px;vertical-align:middle;}
+</style></head>
+<body><div class="wrap">
+
+<h1>A world model's uncertainty is a <span style="color:#56d364">monitor</span>, not a controller</h1>
+<p class="sub">Selective prediction on a frozen <b>LeWorldModel</b> (LeWM, arXiv:2603.19312) over Push-T. The constructive result (M1.6) of the uncertainty thread &mdash; no retraining.</p>
+
+<div class="thesis">A JEPA world model can't use its uncertainty to <b>decide better</b> (planning &amp; active-sensing are null on two substrates). But it <b>can</b> use it to know <b>when to abstain</b> from its own prediction &mdash; and the two free signals it exposes are <b>complementary</b>, together recovering up to <b>91%</b> of an oracle's selective-prediction skill.</div>
+
+<h2>How it works &mdash; architecture</h2>
+<div class="grid">
+ <div class="panel">
+  <h3>The model &amp; its two free signals</h3>
+  <p class="cap">read off the frozen LeWM, no retraining</p>
+  <ul>
+   <li><b>LeWM</b>: ViT encoder &rarr; 192-d latent kept on a Gaussian <b>shell</b> by a SIGReg term; an action-conditioned predictor rolls the latent forward.</li>
+   <li><span class="sig o">shell deviation</span> = <code>|&#8741;emb&#8741; &minus; shell|</code> &mdash; an <b>OOD / epistemic</b> signal (&ldquo;is this input familiar?&rdquo;).</li>
+   <li><span class="sig b">MC-dropout variance</span> of the predictor &mdash; a <b>predictive-error</b> signal (&ldquo;will I be wrong?&rdquo;), Pearson +0.41 vs rollout error.</li>
+   <li><span class="sig p">combined</span> = z-score(MC) + z-score(shell) &mdash; both facets at once.</li>
+  </ul>
+ </div>
+ <div class="panel">
+  <h3>The monitor &mdash; selective prediction</h3>
+  <p class="cap">turn a calibrated signal into an abstain decision</p>
+  <ul>
+   <li>For each prediction, rank transitions by a signal; <b>keep the most-confident fraction</b> <code>c</code> (coverage), abstain on the rest.</li>
+   <li>Measure mean error on the <i>kept</i> set &rarr; a <b>risk&ndash;coverage curve</b>; summarise by <b>AURC</b> (area, lower = better).</li>
+   <li>References: <span class="g">oracle</span> (rank by the <i>true</i> error &mdash; the floor) and <span class="r">random</span> (flat at the mean error &mdash; no-skill ceiling).</li>
+   <li>Two failure modes, reported separately so the win isn't a trivial OOD-sort: <b>in-distribution</b> (hard transitions) and <b>shift</b> (corrupted inputs).</li>
+  </ul>
+ </div>
+</div>
+
+<h2>How it's used at deploy</h2>
+<div class="panel">
+ At inference the signal is a one-line read off the model. Pick an operating point on the risk&ndash;coverage curve (a threshold), then <b>act when confident, abstain / flag / re-plan when the signal is high</b>. Match the signal to the failure mode you expect: <span class="sig b">MC-variance</span> for in-distribution predictive error, <span class="sig o">shell</span> for distribution shift, <span class="sig p">combined</span> when both are in play. Reproduce: <code>python src/monitor.py</code>.
+</div>
+
+<h2>The positive results &mdash; AURC (lower = better)</h2>
+<div class="grid">
+ <div class="panel"><h3>In-distribution</h3><p class="cap">clean Push-T transitions &mdash; can the predictive signal abstain from the hard ones, with no OOD tell?</p><div id="indist"></div></div>
+ <div class="panel"><h3>Mixed (clean + corrupted)</h3><p class="cap">add noise-corrupted inputs &mdash; can the shell catch them, and does combining cover both?</p><div id="mixed"></div></div>
+</div>
+<div class="leg"><span class="sw" style="background:var(--green)"></span>oracle (floor)<span class="sw" style="background:var(--blue)"></span>MC-variance<span class="sw" style="background:var(--orange)"></span>shell<span class="sw" style="background:var(--purple)"></span>combined<span class="sw" style="background:var(--gray)"></span>random (no-skill) &nbsp;&middot;&nbsp; bar length = AURC; <b>% = share of the random&rarr;oracle skill gap recovered</b>.</div>
+
+<h2>How to read it</h2>
+<div class="panel">
+ <ul>
+  <li><b>Shorter bar = better monitor.</b> The <span class="g">green</span> bar (oracle) is the best achievable; the <span class="r">gray</span> dashed line (random) is no-skill. A signal is useful when its bar sits left of random and near oracle &mdash; the <b>% gap recovered</b> quantifies it.</li>
+  <li><b>Complementary facets.</b> <span class="sig b">MC-variance</span> wins <b>in-distribution</b> (recovers ~60% of the skill gap) where <span class="sig o">shell</span> is useless (it's an OOD signal, and there's no OOD &mdash; orthogonal, as expected). On the <b>mixed</b> pool the shell catches the corruption and <span class="sig p">combined</span> recovers <b>~91%</b> &mdash; each facet covers a failure mode the other is blind to.</li>
+  <li><b>The honest caveat.</b> Combining <i>hurts</i> in-distribution (the shell is pure noise there). The rule: <b>use the facet that matches your failure mode; combine only when both are in play.</b></li>
+ </ul>
+ <table id="tbl"></table>
+</div>
+
+<p class="foot">M1.6, <code>lewm-uncertainty</code>. Negatives that frame this positive (control &amp; active-sensing nulls on LeWM <i>and</i> a foveal-vision WM): <code>docs/note-actionable-uncertainty.md</code>. Uncertainty tells you <b>when you don't know</b>, not <b>what to do</b> about it.</p>
+
+</div>
+<script>
+const DATA={
+ indist:{mean:2.568, sig:{oracle:1.311,"MC-variance":1.820,combined:2.129,shell:2.683,random:2.568}},
+ mixed: {mean:8.359, sig:{oracle:3.792,combined:4.219,shell:4.568,"MC-variance":5.762,random:8.359}},
+};
+const COL={oracle:"#27ae60","MC-variance":"#2980b9",shell:"#e67e22",combined:"#8e44ad",random:"#6e7681"};
+function gapPct(v,o,r){return r<=o?0:100*(r-v)/(r-o);}      // share of random->oracle gap recovered
+function chart(id,P){
+ const o=P.sig.oracle, r=P.sig.random, names=Object.keys(P.sig).sort((a,b)=>P.sig[a]-P.sig[b]);
+ const W=420,rh=34,H=names.length*rh+14,L=92,Rr=14,xmax=r*1.08;
+ const x=v=>L+v/xmax*(W-L-Rr);
+ let s=`<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">`;
+ // random reference line
+ s+=`<line x1="${x(r)}" y1="6" x2="${x(r)}" y2="${H-8}" stroke="#6e7681" stroke-dasharray="4 3" stroke-width="1"/>`;
+ names.forEach((n,i)=>{const y=8+i*rh, v=P.sig[n], c=COL[n]||"#888";
+  s+=`<rect x="${L}" y="${y}" width="${Math.max(2,x(v)-L)}" height="20" rx="3" fill="${c}" opacity="${n==='random'?0.32:0.9}"/>`;
+  s+=`<text x="${L-6}" y="${y+14}" text-anchor="end" fill="#e6edf3" font-size="12.5" font-weight="600">${n}</text>`;
+  let lab=v.toFixed(2);
+  if(n!=='oracle'&&n!=='random'){const g=gapPct(v,o,r); lab+=`  (${g>=0?'+':''}${g.toFixed(0)}% gap)`;}
+  else if(n==='oracle') lab+='  floor';
+  else lab+='  no-skill';
+  s+=`<text x="${x(v)+6}" y="${y+14}" fill="#8b949e" font-size="11.5">${lab}</text>`;
+ });
+ s+=`</svg>`;
+ document.getElementById(id).innerHTML=s;
+}
+chart("indist",DATA.indist); chart("mixed",DATA.mixed);
+// table: % gap recovered, both pools
+const order=["MC-variance","shell","combined"];
+let t=`<tr><th>signal</th><th>in-dist AURC</th><th>gap rec.</th><th>mixed AURC</th><th>gap rec.</th></tr>`;
+for(const n of order){
+ const di=DATA.indist, mx=DATA.mixed;
+ const gi=gapPct(di.sig[n],di.sig.oracle,di.sig.random), gm=gapPct(mx.sig[n],mx.sig.oracle,mx.sig.random);
+ const cls=g=>g>5?'win':(g<-2?'lose':'');
+ t+=`<tr><td class="sig">${n}</td><td>${di.sig[n].toFixed(2)}</td><td class="${cls(gi)}">${gi>=0?'+':''}${gi.toFixed(0)}%</td>`
+  +`<td>${mx.sig[n].toFixed(2)}</td><td class="${cls(gm)}">${gm>=0?'+':''}${gm.toFixed(0)}%</td></tr>`;
+}
+t+=`<tr><td class="r">random / oracle</td><td>${DATA.indist.sig.random.toFixed(2)} / ${DATA.indist.sig.oracle.toFixed(2)}</td><td>&mdash;</td>`
+ +`<td>${DATA.mixed.sig.random.toFixed(2)} / ${DATA.mixed.sig.oracle.toFixed(2)}</td><td>&mdash;</td></tr>`;
+document.getElementById("tbl").innerHTML=t;
+</script>
+</body></html>
