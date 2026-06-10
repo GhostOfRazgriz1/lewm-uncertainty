@@ -118,6 +118,18 @@ surprise signal lives in information you only have *after looking* (the true lat
 drifted estimate you can't reliably tell you've diverged — almost definitionally. → M1.5 (drift-aware
 training) is the pre-registered next lever, with a real chance of another principled negative.
 
+**M1.5 — drift-aware head** (`src/surprise_head_drift.py`, `lewm_drift_aware.png`). Removes M1.4's
+train/deploy gap: train `(ẑ_drifted, a, h) → realized one-step error` on the *exact* deploy distribution
+(random-look free-runs), with `h` (steps-since-look) handed to the head explicitly. **Still NULL —
+decisively.** Eval 1 is the smoking gun: the head's held-out correlation with realized error is **+0.20,
+*worse* than `h`-alone (+0.43)** — on a drifted estimate the only reliable predictor of "how wrong am I"
+is *how long since I looked*; the state `(z, a)` not only fails to add signal, it dilutes `h`. Eval 2
+(budget 0.29): `drift-aware` 3.35 ± 0.61 is at/above fixed-interval 2.88 ± 0.26 across the whole sweep
+(oracle 2.28). So even with the distribution gap closed and `h` provided, **no learnable causal signal
+beats uniform spacing.** The obstacle is structural: you cannot read state-dependent divergence off your
+own diverged estimate — the best observation-free predictor of your error is elapsed time, which *is*
+fixed-interval.
+
 **Verdict.** The calibration story is: *world models carry different, incomplete, calibrated facets of "I
 don't know" (LeWM OOD-geometry; MC-dropout predictive-error; ours `u_hat`) — but they are hard to sharpen
 (heteroscedastic head failed, structural) and hard to act on (planning-penalty null on a working planner).*
@@ -129,6 +141,12 @@ sensing, and sharpen it:** the signal isn't only hard to *act on*, it's hard to 
 MC-dropout is flat (≈ random scheduling), and a learned surprise head is sharp on true latents but
 collapses on the drifted estimate you actually hold at decision time. The throughline across M1.2–M1.4: a
 world model's useful "I don't know" tends to require the very observations you are trying to budget.
+**M1.5 closes the arc:** training the surprise predictor on the exact deploy distribution, with elapsed
+time handed to it, *still* can't beat uniform spacing — on a drifted estimate the head is worse than the
+steps-since-look clock alone. Four honest negatives, one mechanism: the oracle (truth) wins throughout, so
+the headroom is real, but no signal computable from the agent's own state reaches it. The contribution is
+the layered demonstration that a world model's actionable uncertainty lives in the observations you're
+trying to avoid.
 
 ## Repo layout
 
