@@ -22,8 +22,12 @@ Augmenting **LeWorldModel** (LeWM) with calibrated uncertainty — for OOD detec
 ## Colab — Milestone 0  (GPU runtime; run cell by cell, absolute `/content` paths)
 
 ```python
-# Cell 1 — deps. transformers 4.x is REQUIRED (5.x silently loads the ViT as random).
-!pip install -q "stable-worldmodel[train,env]" stable-pretraining "transformers==4.49.0"
+# Cell 1 — deps. Do NOT pin transformers (stable-worldmodel resolves its own; pinning 4.49 conflicts).
+# The checkpoint has old (4.x) ViT key names, so we just need whatever 4.x sw pulls.
+!pip install -q "stable-worldmodel[train,env]" stable-pretraining
+import transformers; print("transformers:", transformers.__version__)   # report this
+# If Cell 3 later asserts on a key mismatch, transformers resolved to 5.x -> run:
+#   !pip install -q "transformers<4.50"   then Runtime>Restart, then re-run from Cell 2.
 ```
 ```python
 # Cell 2 — code (rm first so a re-run from a failed clone is clean)
