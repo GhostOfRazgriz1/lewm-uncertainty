@@ -12,6 +12,10 @@ picks the wrong env. Mirrors src/active_sense.py (variance / fixed / random / or
 
 Run on Colab GPU:  python src/active_sense_cube.py
 """
+import os
+os.environ.setdefault("MUJOCO_GL", "egl")                         # headless MuJoCo GL on Colab GPU -- MUST precede the
+# gymnasium/stable_worldmodel imports (Cube/Reacher/TwoRooms are MuJoCo; PushT isn't). If EGL is unavailable,
+# fall back to "osmesa" (CPU, slower): set MUJOCO_GL=osmesa and `apt-get install -y libosmesa6-dev`.
 import sys
 import numpy as np
 import torch
