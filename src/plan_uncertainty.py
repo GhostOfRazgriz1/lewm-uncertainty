@@ -17,8 +17,9 @@ from src.load_lewm import load_lewm
 
 FS, HS, HORIZON = 5, 3, 6                                          # frameskip, history, plan horizon (model steps)
 S, CEM_ITERS, ELITE, MC = 96, 3, 12, 6
-EPISODES, BUDGET = 12, 15
-BETAS = [0.0, 0.5, 1.0]
+ACTION_SCALE = 2.0                                                 # env [-1,1] -> model's z-scored input (from plan_diagnose: CEM beats random at ~2x)
+EPISODES, BUDGET = 20, 15
+BETAS = [0.0, 1.0]
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model, cfg = load_lewm("/content/le-wm", device=device)
 prep = TT.Compose([TT.ToTensor(), TT.Resize((224, 224)), TT.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
@@ -42,7 +43,7 @@ def rollout_final(cur_emb, plans, dropout):
         set_drop(True)
     Sn, P, _ = plans.shape
     emb = cur_emb[None, None].expand(Sn, 1, 192).clone()          # [S,1,192]
-    act = model.action_encoder(plans)                            # [S,P,192]
+    act = model.action_encoder(plans * ACTION_SCALE)             # scale env actions -> model's trained range
     for t in range(P):
         e_tr = emb[:, -HS:]
         a_tr = act[:, :t + 1][:, -HS:]
