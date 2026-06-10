@@ -56,7 +56,7 @@ def aurc(signal, err):
 
 # ---- build per-transition items: (mc_var, shell_dev, true_error, is_ood) ------------------------
 gen = np.random.default_rng(0); crng = np.random.default_rng(1)
-mc_v, sh_d, err, ood = [], [], [], []
+mc_v, sh_d, err, ood, nrm = [], [], [], [], []                   # nrm = raw ||emb|| (for the shell viz)
 for r in range(N_ROLLOUTS):
     frames, acts = rollout(gym.make("swm/PushT-v1", render_mode="rgb_array"), T_STEPS, gen)
     emb = encode_all(frames)                                      # [T+1,192] clean
@@ -65,16 +65,16 @@ for r in range(N_ROLLOUTS):
     for t in range(HS - 1, T_STEPS):
         eh, ah = emb[t - HS + 1:t + 1], ae[t - HS + 1:t + 1]
         mu, var = _predict_one(eh, ah, mc=MC)
-        mc_v.append(var); sh_d.append(abs(float(emb[t].norm()) - SHELL))
+        mc_v.append(var); nrm.append(float(emb[t].norm())); sh_d.append(abs(nrm[-1] - SHELL))
         err.append(float((mu - emb[t + 1]).norm())); ood.append(0)
         eh_c = eh.clone(); eh_c[-1] = emb_c[t]                    # corrupt the CURRENT observation
         mu_c, var_c = _predict_one(eh_c, ah, mc=MC)
-        mc_v.append(var_c); sh_d.append(abs(float(emb_c[t].norm()) - SHELL))
+        mc_v.append(var_c); nrm.append(float(emb_c[t].norm())); sh_d.append(abs(nrm[-1] - SHELL))
         err.append(float((mu_c - emb[t + 1]).norm())); ood.append(1)
     if r % 10 == 0:
         print(f"rollout {r}/{N_ROLLOUTS}", flush=True)
 
-mc_v, sh_d, err, ood = map(np.array, (mc_v, sh_d, err, ood))
+mc_v, sh_d, err, ood, nrm = map(np.array, (mc_v, sh_d, err, ood, nrm))
 ind = ood == 0
 print(f"\nsanity: shell deviation  clean {sh_d[ind].mean():.2f}  vs  corrupted {sh_d[~ind].mean():.2f}"
       f"   | error clean {err[ind].mean():.2f} vs corrupted {err[~ind].mean():.2f}")
@@ -128,3 +128,21 @@ for axi, (pname, (row, e, sigs, rand)) in zip(ax, results.items()):
 fig.suptitle("M1.6 -- uncertainty as a runtime monitor (selective prediction on LeWM)", fontweight="bold")
 fig.tight_layout(); fig.savefig("/content/lewm-uncertainty/lewm_monitor.png", dpi=110)
 print("\nsaved lewm_monitor.png")
+
+# ---- dump per-sample signal distributions for the HTML report (viz/monitor.html) ----------------
+import json
+
+
+def _ds(a, n=500):                                               # downsample for a compact JSON
+    a = np.asarray(a, float)
+    idx = np.linspace(0, len(a) - 1, min(n, len(a))).astype(int)
+    return np.round(a[idx], 4).tolist()
+
+
+viz = {"schematic": False, "shell_radius": round(float(SHELL), 3),
+       "norm": {"in_dist": _ds(nrm[ind]), "ood": _ds(nrm[~ind])},               # raw ||emb|| (shell viz)
+       "scatter": {"in_dist": {"mc": _ds(mc_v[ind]), "err": _ds(err[ind])},     # MC-variance vs true error
+                   "ood": {"mc": _ds(mc_v[~ind]), "err": _ds(err[~ind])}},
+       "aurc": {p: {k: round(v, 4) for k, v in results[p][0].items()} for p in results}}
+json.dump(viz, open("/content/lewm-uncertainty/lewm_monitor_data.json", "w"))
+print("saved lewm_monitor_data.json  (drop into viz/ to populate the HTML report's signal panels)")
