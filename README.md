@@ -131,6 +131,17 @@ beats uniform spacing.** The obstacle is structural: you cannot read state-depen
 own diverged estimate — the best observation-free predictor of your error is elapsed time, which *is*
 fixed-interval.
 
+**M1.6 — uncertainty as a runtime monitor** (`src/monitor.py`, `lewm_monitor.png`) — the **positive
+complement**. The arc shows uncertainty can't *improve* a decision; this asks if it flags *when to abstain*.
+Selective prediction (rank by a signal, keep coverage `c`, measure error on the kept set; AURC, lower
+better). **In-dist:** MC-variance AURC **1.82** vs random 2.57 (oracle 1.31) — abstains from hard transitions
+with no OOD tell; the shell signal is useless there (2.68 ≈ random, orthogonal). **Mixed (clean +
+noise-corrupted):** the shell signal **4.57** vs random 8.36 catches the corruption, and **combined 4.22**
+beats both singles, approaching oracle 3.79. So **each facet is a working monitor for its own failure mode
+and blind to the other; combined covers both.** Caveat that sharpens the rule: combining *hurts* in-dist
+(2.13 vs MC 1.82) — use the facet matching your failure mode, combine only when both are in play.
+**POSITIVE** — the "complementary facets" analysis becomes an actionable monitor.
+
 **Verdict.** The calibration story is: *world models carry different, incomplete, calibrated facets of "I
 don't know" (LeWM OOD-geometry; MC-dropout predictive-error; ours `u_hat`) — but they are hard to sharpen
 (heteroscedastic head failed, structural) and hard to act on (planning-penalty null on a working planner).*
@@ -147,7 +158,11 @@ time handed to it, *still* can't beat uniform spacing — on a drifted estimate 
 steps-since-look clock alone. Four honest negatives, one mechanism: the oracle (truth) wins throughout, so
 the headroom is real, but no signal computable from the agent's own state reaches it. The contribution is
 the layered demonstration that a world model's actionable uncertainty lives in the observations you're
-trying to avoid.
+trying to avoid. **M1.6 flips the sign on the *other* use of uncertainty:** used as a *monitor* (selective
+prediction) rather than a *controller*, the same signals work — MC-variance abstains from in-dist hard
+transitions, the shell from OOD/corruption, combined covers both (AURC ≪ random, approaching oracle). The
+dividing line is the result: **a world model's uncertainty is a monitor, not a controller — it tells you
+when you don't know, not what to do about it.** Full writeup: `docs/note-actionable-uncertainty.md`.
 
 ## Repo layout
 
