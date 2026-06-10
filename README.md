@@ -20,6 +20,7 @@ Augmenting **LeWorldModel** (LeWM) with calibrated uncertainty — for OOD detec
   3. **Uncertainty-aware *sensing* (M1.3):** redirect the calibrated signal from control (M1.2 null) to **perception** — the white space nobody in the LeWM citation set occupies. *Temporal active sensing:* the agent maintains a latent, and MC-dropout variance decides *when* to spend a real observation (re-encode the true frame) vs predict forward. Compare latent-tracking error vs **fixed-interval / random / oracle** schedules **at matched budget**. Frames stay full+real so the ViT encoder is never OOD (unlike spatial foveation). `src/active_sense.py` (Colab); pure scheduling logic in `src/schedules.py` (unit-tested locally).
   4. **Learned surprise head (M1.4):** M1.3's deployable signal (MC-dropout) was flat, but the oracle showed real headroom. Train a tiny MLP `(z, a) → log1p(one-step error)` on true latents (free labels, no retrain) and ask: is one-step surprise *causally predictable* sharply enough to recover the oracle scheduling? `src/surprise_head.py`; spec `docs/M1.4-surprise-head-spec.md`.
   5. **Drift-aware head (M1.5):** M1.4 was PARTIAL (predictable on true latents, collapses on the drifted deploy estimate). Train the head on *exactly* the deploy distribution — pairs `(ẑ_drifted, a, h) → realized error` from random-look free-runs, `h` given explicitly. WIN (beats fixed) = first constructive positive; NULL (ties fixed) = obstacle is structural. `src/surprise_head_drift.py`; spec `docs/M1.5-drift-aware-spec.md`.
+  6. **Runtime monitor (M1.6) — the positive complement.** The arc (M1.2–1.5) shows uncertainty can't *improve* a decision; M1.6 asks if it tells you *when to abstain*. Selective prediction: rank transitions by MC-variance / shell / combined, risk–coverage / AURC on prediction error, in-dist + corruption shift. POSITIVE if uncertainty beats random and the facets are complementary (MC in-dist, shell on shift). `src/monitor.py`; spec `docs/M1.6-monitor-spec.md`.
 - **M2 — heavy (retrain, needs the 13 GB + sims).** Stochastic LeWM: predictor outputs `(μ, σ)`; loss `KL(posterior‖prior) + λ·SIGReg` (Dreamer ELBO with SIGReg replacing reconstruction). Proper predictive uncertainty → uncertainty-aware planning, benchmarked vs M1's derived signal and vs vanilla.
 
 ## Colab — Milestone 0  (GPU runtime; run cell by cell, absolute `/content` paths)
@@ -159,9 +160,12 @@ src/active_sense.py      # M1.3 — temporal active sensing (when to look); Cola
 src/schedules.py         # M1.3 — pure look-scheduling policies (no torch/swm)
 src/surprise_head.py     # M1.4 — learned (z,a)->surprise head + held-out corr + deploy; Colab GPU
 src/surprise_head_drift.py  # M1.5 — drift-aware head (z,a,h) trained on the deploy distribution; Colab GPU
+src/monitor.py           # M1.6 — uncertainty as a runtime monitor (selective prediction); Colab GPU
 tests/test_schedules.py  # local unit tests for the scheduling logic — python tests/test_schedules.py
 docs/M1.4-surprise-head-spec.md  # M1.4 design spec
 docs/M1.5-drift-aware-spec.md    # M1.5 design spec
+docs/M1.6-monitor-spec.md        # M1.6 design spec
+docs/note-actionable-uncertainty.md  # technical note: the M1.2-1.5 negative arc
 ```
 
 ## Status
@@ -172,4 +176,6 @@ M0 scripts are **written-for-Colab and untested** (the sims don't run on the Win
 
 **M1.4 (learned surprise head)** is **written-for-Colab and untested on GPU**. `src/active_sense.py` was refactored so its rig helpers import cleanly (M1.3 still runs identically under `__main__`); `src/surprise_head.py` imports them. Schedule tests stay green. Run after M1.3: `python src/surprise_head.py`. *(M1.4 ran: surprise predictable on true latents (+0.38) but PARTIAL on deploy — train/deploy drift gap. See Results.)*
 
-**M1.5 (drift-aware head)** is **written-for-Colab and untested on GPU**. `src/surprise_head_drift.py` reuses the rig; trains on the deploy distribution (random-look drift pairs). Run: `python src/surprise_head_drift.py`.
+**M1.5 (drift-aware head)** is **written-for-Colab and untested on GPU**. `src/surprise_head_drift.py` reuses the rig; trains on the deploy distribution (random-look drift pairs). Run: `python src/surprise_head_drift.py`. *(M1.5 ran: decisive NULL — head < h-alone; uniform spacing unbeatable. Closes the negative arc.)*
+
+**M1.6 (runtime monitor)** is **written-for-Colab and untested on GPU** — the *positive-complement* experiment. `src/monitor.py` reuses the rig; selective prediction (risk-coverage/AURC) on in-dist + corrupted transitions. Run: `python src/monitor.py`.
