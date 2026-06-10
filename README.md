@@ -193,4 +193,6 @@ M0 scripts are **written-for-Colab and untested** (the sims don't run on the Win
 
 **M1.5 (drift-aware head)** is **written-for-Colab and untested on GPU**. `src/surprise_head_drift.py` reuses the rig; trains on the deploy distribution (random-look drift pairs). Run: `python src/surprise_head_drift.py`. *(M1.5 ran: decisive NULL — head < h-alone; uniform spacing unbeatable. Closes the negative arc.)*
 
-**M1.6 (runtime monitor)** is **written-for-Colab and untested on GPU** — the *positive-complement* experiment. `src/monitor.py` reuses the rig; selective prediction (risk-coverage/AURC) on in-dist + corrupted transitions. Run: `python src/monitor.py`.
+**M1.6 (runtime monitor)** is **written-for-Colab and untested on GPU** — the *positive-complement* experiment. `src/monitor.py` reuses the rig; selective prediction (risk-coverage/AURC) on in-dist + corrupted transitions. Run: `python src/monitor.py`. *(M1.6 ran: POSITIVE — uncertainty is a monitor, not a controller; complementary facets. See Results.)*
+
+**M1.3-Cube (#3 flip-test)** is **written-for-Colab and untested on GPU**. `src/active_sense_cube.py` reruns the M1.3 sensing comparison on the contact-rich `quentinll/lewm-cube` checkpoint (self-configuring: auto-discovers the swm Cube env, derives frameskip from the 25-d action). Tests whether the sensing null was a Push-T determinism artifact (bigger oracle headroom? can MC-variance read any of it?). Run: `python src/active_sense_cube.py`. *Caveat: cube env id + load_lewm config compatibility resolve on first Colab run.*
