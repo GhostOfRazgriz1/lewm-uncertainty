@@ -73,6 +73,23 @@ signal is flat against prediction error (Pearson +0.05) → the two are **orthog
 subsumes the other — the complementary-facets thesis, demonstrated within one model on real transitions.
 → unblocks **M1.2:** uncertainty-aware CEM with cost `get_cost + β·MC-variance`.
 
+**M1.2 — uncertainty-aware CEM planning** (`src/plan_uncertainty.py`, `src/plan_diagnose.py`). First run
+looked like a flat null — but the diagnostic (`plan_diagnose.py`) exposed a **confound**: at action-scale
+1.0 (raw `[-1,1]`) the planner is *worse than random* (−16) because the model was trained on z-scored
+actions; at **scale 2.0** CEM beats random by **+40** (planner actually steers). Re-run on the working
+planner (scale 2.0, 20 eps): vanilla −243.8 ± 105.9 vs `β=1.0` uncertainty-aware −250.3 ± 93.6 →
+**delta −6.4, inside the ~±22 SEM. CLEAN NULL.** So a calibrated predictive uncertainty does **not** improve
+this planner via a cost penalty: **calibration ≠ actionability** (Push-T is near-deterministic; distrusting
+uncertain plans biases toward *predictable*, not *goal-reaching*, plans).
+
+**Verdict.** The calibration story is: *world models carry different, incomplete, calibrated facets of "I
+don't know" (LeWM OOD-geometry; MC-dropout predictive-error; ours `u_hat`) — but they are hard to sharpen
+(heteroscedastic head failed, structural) and hard to act on (planning-penalty null on a working planner).*
+The **analysis** (measuring the facets, across models, on real substrates, with the confounds caught) is the
+contribution; the **constructive** side is a set of honest negatives. M2 (stochastic RSSM/KL retrain) would
+give a "better" uncertainty, but the M1.2 null suggests the blocker is task-relevance, not uncertainty
+quality — so M2 is a high-cost bet with uncertain payoff.
+
 ## Repo layout
 
 ```
