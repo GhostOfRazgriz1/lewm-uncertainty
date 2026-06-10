@@ -101,13 +101,33 @@ uncertainty **is** actionable in principle (the oracle wins, unlike control), bu
 signal can't realize it — **the bottleneck is signal sharpness, which is fixable** (→ M1.4: a learned
 one-step-surprise head, no retrain, tested vs MC-dropout and the oracle ceiling).
 
+**M1.4 — learned surprise head** (`src/surprise_head.py`, `lewm_surprise_head.png`). Can a sharp *causal*
+signal capture the M1.3 oracle headroom MC-dropout missed? A tiny MLP `(z, a) → log1p(one-step error)`
+trained on TRUE latents (held-out split, no retrain). **Eval 1 — predictability: yes, but shallow.**
+Held-out Spearman **+0.38** vs true surprise (≫ MC-dropout's ~0) — surprise *is* causally predictable —
+but the trivial `latent-drift` baseline gets **+0.36**, so most of it is motion-autocorrelation
+(`|action|` +0.17). **Eval 2 — deployment: no.** At budget 0.29, `learned` **2.83 ± 0.33** is within-SEM
+of, and slightly worse than, **fixed-interval 2.45 ± 0.21** (oracle 2.17). **PARTIAL.** The two evals
+disagree for one reason: eval-1's correlation is on **true** latents, but deployment runs on the
+**drifted maintained** latent. `latent-drift` deploys *worst of all* despite its high true-latent
+correlation — once the agent predicts forward the predictor yields smooth rollouts, so `‖ẑ−ẑ‖` reads the
+model's *self-motion*, not reality's surprise; the head survives a little better only via the (undrifted)
+action, which is weak. **The binding constraint is the train/deploy distribution gap:** the useful
+surprise signal lives in information you only have *after looking* (the true latent); from your own
+drifted estimate you can't reliably tell you've diverged — almost definitionally. → M1.5 (drift-aware
+training) is the pre-registered next lever, with a real chance of another principled negative.
+
 **Verdict.** The calibration story is: *world models carry different, incomplete, calibrated facets of "I
 don't know" (LeWM OOD-geometry; MC-dropout predictive-error; ours `u_hat`) — but they are hard to sharpen
 (heteroscedastic head failed, structural) and hard to act on (planning-penalty null on a working planner).*
 The **analysis** (measuring the facets, across models, on real substrates, with the confounds caught) is the
 contribution; the **constructive** side is a set of honest negatives. M2 (stochastic RSSM/KL retrain) would
 give a "better" uncertainty, but the M1.2 null suggests the blocker is task-relevance, not uncertainty
-quality — so M2 is a high-cost bet with uncertain payoff.
+quality — so M2 is a high-cost bet with uncertain payoff. **M1.3–M1.4 extend the negative from control to
+sensing, and sharpen it:** the signal isn't only hard to *act on*, it's hard to *obtain causally* —
+MC-dropout is flat (≈ random scheduling), and a learned surprise head is sharp on true latents but
+collapses on the drifted estimate you actually hold at decision time. The throughline across M1.2–M1.4: a
+world model's useful "I don't know" tends to require the very observations you are trying to budget.
 
 ## Repo layout
 
