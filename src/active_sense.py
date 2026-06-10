@@ -195,11 +195,21 @@ print(f"  fixed-interval : {fixed_e[ki].mean():.3f} +/- {sem(fixed_e)[ki]:.3f}")
 print(f"  random         : {rand_e[ki].mean():.3f} +/- {sem(rand_e)[ki]:.3f}")
 print(f"  variance (tau)  : {var_e[ti].mean():.3f} +/- {sem(var_e)[ti]:.3f}   (achieved budget {var_b[ti].mean():.2f})")
 print(f"  oracle (ceiling): {orac_e[ki].mean():.3f} +/- {sem(orac_e)[ki]:.3f}")
-delta = fixed_e[ki].mean() - var_e[ti].mean()
+delta = fixed_e[ki].mean() - var_e[ti].mean()                              # >0 => variance beats fixed
 pooled = np.hypot(sem(fixed_e)[ki], sem(var_e)[ti])
-print(f"\n  variance vs fixed: delta {delta:+.3f}  (pooled SEM {pooled:.3f})")
-print("  WIN" if delta > pooled else "  NULL", "-- calibrated WM uncertainty",
-      "IS actionable for sensing." if delta > pooled else "is NOT actionable here (uniform error growth).")
+vs_rand = var_e[ti].mean() - rand_e[ki].mean()                             # ~0 => signal no better than chance
+head = (fixed_e - orac_e).mean(1)                                          # oracle's gain over fixed, per matched-K budget
+hk = int(np.argmax(head)); head_sem = np.hypot(sem(fixed_e)[hk], sem(orac_e)[hk])
+print(f"\n  variance vs fixed : delta {delta:+.3f} (pooled SEM {pooled:.3f}) | vs random: {vs_rand:+.3f}")
+print(f"  oracle headroom   : up to {head[hk]:+.3f} over fixed at budget {K_GRID[hk] / T1:.2f} (SEM {head_sem:.3f})")
+# Three-way verdict -- distinguishes "no headroom" from "headroom exists but the signal can't see it".
+if delta > pooled:
+    print("  WIN -- MC-dropout variance schedules looks BETTER than fixed-interval.")
+elif head[hk] > head_sem:
+    print("  NULL (signal too FLAT) -- a perfect schedule (oracle) DOES beat fixed, but MC-dropout variance is")
+    print("        ~indistinguishable from random: the headroom is real, the signal just can't capture it.")
+else:
+    print("  NULL (no headroom) -- fixed-interval is ~optimal; even the oracle barely beats it.")
 
 # ---- figure: error-vs-budget curves + where the looks land ---------------------------------------
 fig, ax = plt.subplots(1, 2, figsize=(12, 4.6))

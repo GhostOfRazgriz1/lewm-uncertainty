@@ -83,6 +83,23 @@ planner (scale 2.0, 20 eps): vanilla −243.8 ± 105.9 vs `β=1.0` uncertainty-a
 this planner via a cost penalty: **calibration ≠ actionability** (Push-T is near-deterministic; distrusting
 uncertain plans biases toward *predictable*, not *goal-reaching*, plans).
 
+**M1.3 — temporal active sensing (when to look)** (`src/active_sense.py`, `src/schedules.py`,
+`lewm_active_sensing.png`). Redirect the signal from control (M1.2 null) to **perception**: the agent
+maintains a latent and MC-dropout variance decides *when* to spend a real observation vs predict forward;
+compare latent-tracking error vs fixed/random/oracle schedules at matched budget. **The deployable policy
+fails.** At budget 0.29 (6/21 looks) the variance policy scores **3.12 ± 0.28 — worse than fixed-interval
+2.34 ± 0.17** (Δ −0.78 ≈ 2.4 SEM) and **statistically tied with random (3.24 ± 0.31)**: MC-dropout variance
+carries ~zero scheduling information. **But this is not "nothing to exploit":** the **oracle** (look at the
+intrinsically-most-surprising steps) **beats fixed-interval** — 2.12 vs 2.34 here, up to ~0.4 (≈30%) at
+mid-budgets — so error growth is **heterogeneous** and the headroom is real. The diagnostic figure shows
+*why* the signal fails: **MC-dropout variance is flat (~0.05–0.1) across the whole rollout** while intrinsic
+surprise is sharply peaked at contacts; the two don't track. This is the **same under-sharpness** that
+limited the foveal `u_hat`, now confirmed **cross-model** — a signal weakly calibrated *in expectation*
+(+0.41, M1.1) but far too flat *per-instance* to act on. Sensing refines the M1.2 control lesson: here
+uncertainty **is** actionable in principle (the oracle wins, unlike control), but the available MC-dropout
+signal can't realize it — **the bottleneck is signal sharpness, which is fixable** (→ M1.4: a learned
+one-step-surprise head, no retrain, tested vs MC-dropout and the oracle ceiling).
+
 **Verdict.** The calibration story is: *world models carry different, incomplete, calibrated facets of "I
 don't know" (LeWM OOD-geometry; MC-dropout predictive-error; ours `u_hat`) — but they are hard to sharpen
 (heteroscedastic head failed, structural) and hard to act on (planning-penalty null on a working planner).*
