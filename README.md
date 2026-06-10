@@ -17,6 +17,7 @@ Augmenting **LeWorldModel** (LeWM) with calibrated uncertainty — for OOD detec
 - **M1 — cheap real-substrate results (no retrain).**
   1. **Rigorous calibration probe** with *real* transitions from planning rollouts: does any derivable uncertainty (MC-dropout variance on the predictor, SIGReg latent-norm deviation, rollout latent-drift) **predict rollout error**? This upgrades the OOD probe to true predictive-error calibration.
   2. **Uncertainty-aware CEM:** score plans by `dist-to-goal + β·(rollout uncertainty)` and compare success rate vs vanilla CEM. The derived uncertainty needs no retrain.
+  3. **Uncertainty-aware *sensing* (M1.3):** redirect the calibrated signal from control (M1.2 null) to **perception** — the white space nobody in the LeWM citation set occupies. *Temporal active sensing:* the agent maintains a latent, and MC-dropout variance decides *when* to spend a real observation (re-encode the true frame) vs predict forward. Compare latent-tracking error vs **fixed-interval / random / oracle** schedules **at matched budget**. Frames stay full+real so the ViT encoder is never OOD (unlike spatial foveation). `src/active_sense.py` (Colab); pure scheduling logic in `src/schedules.py` (unit-tested locally).
 - **M2 — heavy (retrain, needs the 13 GB + sims).** Stochastic LeWM: predictor outputs `(μ, σ)`; loss `KL(posterior‖prior) + λ·SIGReg` (Dreamer ELBO with SIGReg replacing reconstruction). Proper predictive uncertainty → uncertainty-aware planning, benchmarked vs M1's derived signal and vs vanilla.
 
 ## Colab — Milestone 0  (GPU runtime; run cell by cell, absolute `/content` paths)
@@ -93,11 +94,17 @@ quality — so M2 is a high-cost bet with uncertain payoff.
 ## Repo layout
 
 ```
-src/load_lewm.py        # reusable pretrained-LeWM loader (transformers-4.x note baked in)
-src/probe_calibration.py# OOD probe (from perceptor exploration) — upgrades to predictive in M1
-notebooks/              # Colab notebooks per milestone (M0 bootstrap, M1 probe + uncertainty-CEM)
+src/load_lewm.py         # reusable pretrained-LeWM loader (transformers-4.x note baked in)
+src/probe_calibration.py # OOD probe (||emb|| in-dist vs OOD) — from the perceptor exploration
+src/probe_predictive.py  # M1.1 — MC-dropout & latent-shell vs rollout error (predictive calibration)
+src/plan_uncertainty.py  # M1.2 — uncertainty-aware CEM (+ plan_diagnose.py action-scale confound check)
+src/active_sense.py      # M1.3 — temporal active sensing (when to look); Colab GPU
+src/schedules.py         # M1.3 — pure look-scheduling policies (no torch/swm)
+tests/test_schedules.py  # local unit tests for the scheduling logic — python tests/test_schedules.py
 ```
 
 ## Status
 
 M0 scripts are **written-for-Colab and untested** (the sims don't run on the Windows box they were authored on) — expect to debug the env install + checkpoint conversion on the first Colab run. The OOD probe and the loader are validated locally against the pretrained checkpoint.
+
+**M1.3 (active sensing)** is **written-for-Colab and untested on GPU** — same caveat (swm doesn't run on Windows). Its pure scheduling logic is validated locally: `python tests/test_schedules.py` (5 tests, budget-matching + threshold rule). Expect to debug the encode/predict loop on the first GPU run.
