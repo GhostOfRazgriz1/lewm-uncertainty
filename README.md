@@ -60,6 +60,19 @@ Cell 3 should print ~18M params (the validated loader). Cells 4–5 are the part
 
 If M0's success rate reproduces the paper (~the bar charts in their gif), the infra is good and M1 is unblocked.
 
+## Results
+
+**M0 (infra gate):** LeWM loads on Colab (transformers 4.x), `swm/PushT-v1` builds/renders/steps, and the
+rollout→encode→predict pipeline forward-models on real transitions (pred-err 2.30 < copy 2.73). ✅
+
+**M1.1 — predictive-error calibration on 400 real Push-T transitions** (`src/probe_predictive.py`,
+`lewm_predictive_calibration.png`): **MC-dropout variance on the predictor predicts LeWM's own rollout
+error — Pearson +0.41, Spearman +0.40, monotone calibration curve.** No retraining. The OOD/latent-shell
+signal is flat against prediction error (Pearson +0.05) → the two are **orthogonal facets**: MC-dropout =
+*predictive-error* ("will I be wrong"), latent-shell = *epistemic/OOD* ("is this input familiar"). Neither
+subsumes the other — the complementary-facets thesis, demonstrated within one model on real transitions.
+→ unblocks **M1.2:** uncertainty-aware CEM with cost `get_cost + β·MC-variance`.
+
 ## Repo layout
 
 ```
