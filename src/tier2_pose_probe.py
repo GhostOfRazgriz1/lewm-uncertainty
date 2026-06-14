@@ -149,7 +149,8 @@ def probe(model, frames, states, itr, iev, smean, sstd):       # closed-form RID
 
 # ---- data-gen + POSE GATE (first) ---------------------------------------------------------------
 if os.path.exists(DATA_CACHE):
-    d = torch.load(DATA_CACHE); frames, states = d["frames"], d["states"]
+    d = torch.load(DATA_CACHE, weights_only=False)               # our own cache (numpy arrays); torch>=2.6 default rejects
+    frames, states = d["frames"], d["states"]
     print(f"loaded cached data frames {frames.shape} states {states.shape}", flush=True)
 else:
     gen = np.random.default_rng(0); F, St = [], []
