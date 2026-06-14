@@ -29,7 +29,7 @@ from src.load_lewm import load_lewm                               # noqa: E402
 FS, HS, HORIZON = 5, 3, 6                                         # frameskip, history, plan horizon (model steps)
 S, CEM_ITERS, ELITE, MC = 96, 3, 12, 6
 ACTION_SCALE = 2.0                                                # env [-1,1] -> model's z-scored range (M1.2 confound fix)
-EPISODES, BUDGET, NOISE_SIGMA = 40, 15, 0.4                       # half the episodes corrupted; NOISE_SIGMA frac of 255
+EPISODES, BUDGET, NOISE_SIGMA = 100, 15, 1.0                      # half corrupted; NOISE_SIGMA=1.0 -> destructive shift (strengthening shot)
 COVS = np.linspace(0.1, 1.0, 19)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model, cfg = load_lewm("/content/le-wm", device=device)
@@ -149,12 +149,37 @@ for n, s in sigs.items():
     print(f"  {n:12s}: {aurc(s):8.2f}")
 print(f"  {'oracle':12s}: {aurc(risk):8.2f}   (floor)")
 print(f"  {'random':12s}: {rand:8.2f}   (= mean risk, no-skill)")
-gap = rand - aurc(risk)
-best_name = min(sigs, key=lambda n: aurc(sigs[n])); best = aurc(sigs[best_name])
-recov = 100 * (rand - best) / gap if gap > 1e-9 else 0.0
-print(f"\n  best gate ({best_name}) recovers {recov:.0f}% of the random->oracle gap -> "
-      + ("WIN: uncertainty-gating improves control reliability under shift."
-         if best < rand - 0.02 * abs(rand) else "no gain (signals don't separate failing episodes)."))
+def spearman(a, b):
+    ra, rb = a.argsort().argsort().astype(float), b.argsort().argsort().astype(float)
+    return float(np.corrcoef(ra, rb)[0, 1])
+
+
+print("\n  signal<->risk coupling (Spearman; >0 = high signal predicts high risk = good gate):")
+for n, s in sigs.items():
+    print(f"    {n:12s}: {spearman(s, risk):+.3f}")
+
+# bootstrap SEM on % of the random->oracle gap recovered (resample episodes) -> is the win beyond noise?
+brng = np.random.default_rng(0); N = len(risk); B = 1000
+
+
+def recovered(sig, idx):
+    r = risk[idx]; sg = sig[idx]; n = len(r)
+    rc = np.mean([r[np.argsort(sg)][:max(1, int(c * n))].mean() for c in COVS])
+    rd = r.mean(); orc = np.mean([np.sort(r)[:max(1, int(c * n))].mean() for c in COVS])
+    return 100 * (rd - rc) / (rd - orc) if rd - orc > 1e-9 else 0.0
+
+
+print("\n  % of random->oracle gap recovered (bootstrap SEM over episodes):")
+verdict = {}
+for n, s in sigs.items():
+    pt = recovered(s, np.arange(N))
+    boot = np.array([recovered(s, brng.integers(0, N, N)) for _ in range(B)])
+    verdict[n] = (pt, float(boot.std()))
+    print(f"    {n:12s}: {pt:+.0f}% +/- {boot.std():.0f}%")
+cp, cs = verdict["combined"]
+print("\n  " + ("WIN: gating beats random beyond noise -- uncertainty improves control reliability under shift."
+                if cp > 2 * cs and cp > 5 else
+                "WEAK/NULL: gating within ~noise -- per-episode confidence is decoupled from episode reward."))
 
 # ---- figure: episode risk-coverage --------------------------------------------------------------
 fig, ax = plt.subplots(figsize=(6.6, 4.7))
