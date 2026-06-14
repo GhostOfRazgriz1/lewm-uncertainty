@@ -44,12 +44,28 @@ precision/recall at *detecting* corruption vs the true mask.
 - **NULL** — shell-gate ≈ blind: the shell signal is not actionable for gating either (would extend the
   controller-null to deployment, a clean negative).
 
-## If positive → stage 2 (the paper's headline)
-Plug the gate into **CEM planning** and measure **control cost / success under corruption** vs blind vs a
-*trained*-uncertainty baseline (e.g., a small ensemble of predictors, or a learned corruption classifier).
-The novelty is that the JEPA's *own geometry* gives the deploy-time robustness for free. The M1.2 cost-
-shaping null is the foil: penalizing uncertainty in the cost didn't help, but gating *which observations to
-trust* does — the distinction is the contribution.
+## Stage 2 — CONTROL under corruption (`src/gated_control.py`)
+The headline. Closed-loop CEM control (the M1.2 planner, **vanilla β=0**) to do PushT, with observations
+intermittently corrupted. We change *nothing* about the planner — we gate the **state estimate** it plans
+from: a `blind` agent re-encodes every (possibly corrupted) frame → plans from a poisoned latent; a
+`shell-gate` agent coasts (predict-forward with the executed action) through frames it distrusts → plans from
+a clean estimate. **This is the foil to M1.2:** M1.2 gated the planner's *cost* (`+β·variance`) and found
+nothing; gating *which observations the planner trusts* is a different lever.
+
+- **Policies:** `clean` (no corruption, the ceiling) · `blind` · `random-gate` (coast a matched-rate random
+  subset) · `shell-gate` · `oracle-gate`.
+- **Metric:** best task reward / episode (PushT coverage), mean ± SEM + success-rate; reported as the
+  fraction of the `clean→blind` corruption drop that shell-gate **recovers**. WIN = shell-gate > blind beyond
+  SEM **and** ≈ oracle. First run: noise × p∈{0.3, 0.5}, 15 episodes (~30–60 min Colab).
+- **Note (right facet matters):** the action-free *ensemble* would **fail** as this gate — M2.2 showed it is
+  OOD-blind (heads agree, confidently wrong, on corrupted inputs). It is specifically the **shell/OOD** facet
+  that does deployment work.
+
+## If stage 2 is positive → strengthen for main-track
+Add a **trained supervised corruption classifier** baseline (logistic probe on the latent, *with* labels) to
+show the *free, label-free* shell matches it; add **blackout + subtler shift** (mild corruption where
+detection isn't trivial); and a second substrate. The novelty: the JEPA's *own geometry* gives deploy-time
+robustness for free, where M1.2's cost-shaping could not.
 
 ## Risks / honest scope
 - **shell-gate > blind is near-certain** under heavy corruption (blind adopts garbage). The load-bearing
