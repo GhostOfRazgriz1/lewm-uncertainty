@@ -90,5 +90,6 @@ supervised-quality monitor for free." If supervised >> free, that's an honest li
 - No control here. No training of the agent. Only the tiny supervised detector trains.
 
 ## Next
-- [ ] `src/b1_monitor.py` (mechanical from this spec).
+- [x] `src/b1_monitor.py` written (syntax-checked; run on Colab).
+- [ ] Run on Colab → record per-shift detection AUROC / AURC / partial / free-vs-supervised; verdict.
 - [ ] On WIN → `B2` spec = E2 (uncertainty-cost MPC / trust-gating under sustained outage — the swing).
