@@ -44,8 +44,8 @@ becomes the cross-substrate breadth story, not a loss.
 #    Pins mirror tdmpc2/docker/environment.yaml's DMC subset; tensordict/torchrl left unpinned to
 #    match Colab's torch (the one fragile spot — see "If import fails" below).
 !pip install -q dm-control==1.0.16 mujoco==3.1.2 gymnasium==0.29.1 \
-    hydra-core==1.3.2 omegaconf==2.3.0 tensordict torchrl \
-    kornia==0.7.2 termcolor tqdm imageio imageio-ffmpeg huggingface_hub
+    hydra-core==1.3.2 hydra-submitit-launcher==1.2.0 submitit==1.5.1 omegaconf==2.3.0 \
+    tensordict torchrl kornia==0.7.2 termcolor tqdm imageio imageio-ffmpeg huggingface_hub
 ```
 
 ```python
@@ -71,6 +71,12 @@ scatter) and `_records.pt` (per-step `z`, `q_disag`, `onestep`, returns) for dow
 | ❌ | — | **NO-GO(1)** | Not a research signal — a deps/runtime problem. Triage below. If unfixable on Colab-tier, pivot to the **safe fallback paper** (A1 + identifiability theory + free≈supervised + 2nd JEPA substrate). |
 
 ---
+
+## Setup errors
+
+- **`MissingConfigException: Could not find 'hydra/launcher/submitit_local'`** — TD-MPC2's
+  `config.yaml` defaults pull the submitit launcher plugin. Fix:
+  `pip install hydra-submitit-launcher==1.2.0 submitit==1.5.1` (already in Cell 1 above; no restart).
 
 ## If GATE 1 fails (triage, in order)
 
