@@ -80,7 +80,7 @@ def encode_one(frame):                                           # uint8 HWC -> 
 @torch.no_grad()
 def act_emb_one(mstep):                                          # [10] env action -> [192] (scaled like the planner)
     a = torch.tensor(mstep, dtype=torch.float32, device=device) * ACTION_SCALE
-    return model.action_encoder(a[None])[0]
+    return model.action_encoder(a[None, None])[0, 0]            # [1,1,10] -> [1,1,192] -> [192]
 
 
 @torch.no_grad()
