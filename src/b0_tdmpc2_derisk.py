@@ -72,6 +72,8 @@ ckpt = hf_hub_download("nicklashansen/tdmpc2", filename=f"dmcontrol/{args.task}-
 print(f"[ckpt] {ckpt}", flush=True)
 
 # --- build cfg exactly like evaluate.py: parse_cfg -> make_env (mutates dims) -> TDMPC2 -> load ---
+import hydra.utils as _hu                                         # the compose() API has no Hydra runtime,
+_hu.get_original_cwd = lambda: os.getcwd()                       # so parse_cfg's get_original_cwd() (work_dir, unused here) errors -> patch it
 with initialize_config_dir(config_dir=TDMPC2_DIR, version_base=None):
     cfg = compose(config_name="config", overrides=[
         f"task={args.task}", f"checkpoint={ckpt}", "model_size=5",
