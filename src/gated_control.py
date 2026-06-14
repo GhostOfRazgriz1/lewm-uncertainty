@@ -1,29 +1,28 @@
-"""Direction A, stage 2 -- CONTROL under intermittent observation corruption (the headline).
+"""Direction A, stage 2 (BURST) -- CONTROL through sustained sensor OUTAGES (the headline).
 
-A1 (src/gated_perception.py) showed the free shell signal gates which observations to TRUST, keeping a
-near-oracle latent ESTIMATE under corruption. Stage 2 asks the deployment question reviewers care about:
-does that translate into better CONTROL?
+A2-iid (per-frame corruption) was a DECOUPLING null: corruption wrecks the latent estimate (A1) but MPC
+re-plans from a fresh frame every step, so transient poisoning is self-corrected and control is unmoved.
+The regime where estimate quality BINDS is a SUSTAINED outage: a burst of K consecutive corrupted/missing
+frames during which there is no per-step correction. Then a BLIND agent plans from garbage for the whole
+window, while a SHELL-GATED agent DETECTS the outage (shell signal off the Gaussian shell) and rides it out
+by COASTING on the world model's dynamics (predict forward with the actions it executes) -- exactly what a
+world model is for. The deployment story: survive sensor dropout by trusting the model, not the dead sensor.
 
-THE DISTINCTION FROM M1.2 (which was a null). M1.2 gated the planner's COST -- cost = dist-to-goal +
-beta*MC-variance -- and found no improvement (calibration != actionability). Here we change NOTHING about the
-planner (vanilla beta=0 CEM); we gate the STATE ESTIMATE the planner plans from. Under corruption a BLIND
-agent re-encodes every (possibly corrupted) frame -> plans from a poisoned latent; a SHELL-GATED agent coasts
-through frames it distrusts (predict forward with the executed action) -> plans from a clean estimate.
+THE FOIL TO M1.2: we change NOTHING about the planner (vanilla beta=0 CEM); we gate the STATE ESTIMATE it
+plans from. M1.2 gated the planner's COST (+beta*variance) -> null.
 
-Note: the action-free ENSEMBLE would FAIL as this gate -- M2.2 showed it is OOD-blind (heads agree,
-confidently wrong, on corrupted inputs). It is specifically the shell/OOD facet that does deployment work.
+POLICIES:
+  clean         -- CEM, no outage (ceiling).
+  random-action -- no planning (FLOOR): confirms the planner controls AND the metric/episodes resolve it.
+  blind         -- CEM, re-encode every frame incl. the K-step blackout (poisoned through the outage).
+  random-gate   -- coast a contiguous K-block at the WRONG location (controls: detecting the RIGHT window
+                   vs just coasting for K steps somewhere).
+  shell-gate    -- coast iff |‖encode(obs)‖-√d| >= tau  (ours; tau label-free from clean in-dist).
+  oracle-gate   -- coast exactly during the true outage (ceiling detector).
 
-POLICIES (closed-loop CEM control on swm/PushT-v1):
-  clean        -- no corruption (the ceiling/reference).
-  blind        -- re-encode every frame (poisoned under corruption). baseline.
-  random-gate  -- coast a RANDOM matched subset (isolates: signal vs just-coasting).
-  shell-gate   -- coast iff |‖encode(obs)‖-√d| >= tau  (ours; tau label-free from clean in-dist).
-  oracle-gate  -- coast iff the frame is truly corrupted (knows the mask). ceiling under corruption.
-
-METRIC: best task reward per episode (PushT coverage, higher=better), mean +/- SEM; success-rate @ thresh.
-WIN = shell-gate > blind beyond SEM AND ~= oracle. Spec: docs/A1-gated-perception-spec.md (stage 2 section).
-
-Run on Colab GPU:  python src/gated_control.py
+METRIC: MEAN reward / episode (sensitive to sustained degradation; best-of-episode hid the iid effect),
+also final + best. WIN = shell-gate > blind beyond SEM AND ~= oracle, AND clean >> random-action (planner
+controls). Spec: docs/A1-gated-perception-spec.md (stage 2). Run on Colab GPU:  python src/gated_control.py
 """
 import sys
 import numpy as np
@@ -38,32 +37,20 @@ import matplotlib.pyplot as plt                                   # noqa: E402
 sys.path.insert(0, "/content/lewm-uncertainty")
 from src.load_lewm import load_lewm                               # noqa: E402
 
-FS, HS, HORIZON = 5, 3, 6                                         # frameskip, history window, plan horizon
+FS, HS, HORIZON = 5, 3, 6
 S, CEM_ITERS, ELITE = 96, 3, 12
-ACTION_SCALE = 2.0                                                # env [-1,1] -> model's z-scored range (M1.2)
-EPISODES, BUDGET = 15, 12
-P_GRID = [0.3, 0.5]                                               # corruption rate
-CTYPES = ["noise"]                                               # add "blackout" once positive
-NOISE_SIGMA = 0.4
-SUCCESS_THRESH = 0.9                                              # PushT coverage counted as a "success"
-N_CAL = 15                                                        # clean rollouts to calibrate tau
-TAU_Q = 0.95
+ACTION_SCALE = 2.0
+EPISODES, BUDGET, WARMUP = 24, 16, 3
+OUTAGE_LENS = [4, 8]                                              # consecutive blacked-out steps
+N_CAL, TAU_Q = 15, 0.95
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model, cfg = load_lewm("/content/le-wm", device=device)
 prep = TT.Compose([TT.ToTensor(), TT.Resize((224, 224)), TT.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
 SHELL = cfg["predictor"]["input_dim"] ** 0.5
 
 
-def corrupt_noise(frame, rng):
-    f = frame.astype("float32") + rng.normal(0, NOISE_SIGMA * 255, frame.shape)
-    return np.clip(f, 0, 255).astype("uint8")
-
-
-def corrupt_black(frame, rng):
+def blackout(frame):                                             # sensor dropout: no signal -> ‖emb‖ collapses
     return np.zeros_like(frame)
-
-
-CORRUPT = {"noise": corrupt_noise, "blackout": corrupt_black}
 
 
 def set_drop(b):
@@ -73,24 +60,23 @@ def set_drop(b):
 
 
 @torch.no_grad()
-def encode_one(frame):                                           # uint8 HWC -> [192]
+def encode_one(frame):
     return model.encode({"pixels": prep(frame).to(device)[None, None]})["emb"][0, 0]
 
 
 @torch.no_grad()
-def act_emb_one(mstep):                                          # [10] env action -> [192] (scaled like the planner)
+def act_emb_one(mstep):
     a = torch.tensor(mstep, dtype=torch.float32, device=device) * ACTION_SCALE
-    return model.action_encoder(a[None, None])[0, 0]            # [1,1,10] -> [1,1,192] -> [192]
+    return model.action_encoder(a[None, None])[0, 0]
 
 
 @torch.no_grad()
-def predict_step(Z, A):                                          # coast: next latent from last-HS (states, actions)
-    e = torch.stack(Z[-HS:])[None]; a = torch.stack(A[-HS:])[None]
-    return model.predict(e, a)[0, -1]
+def predict_step(Z, A):                                          # coast: next latent from last-HS states+actions
+    return model.predict(torch.stack(Z[-HS:])[None], torch.stack(A[-HS:])[None])[0, -1]
 
 
 @torch.no_grad()
-def rollout_final(cur_emb, plans):                              # cur_emb [192], plans [S,P,10] -> final emb [S,192]
+def rollout_final(cur_emb, plans):
     Sn, P, _ = plans.shape
     emb = cur_emb[None, None].expand(Sn, 1, 192).clone()
     act = model.action_encoder(plans * ACTION_SCALE)
@@ -100,7 +86,7 @@ def rollout_final(cur_emb, plans):                              # cur_emb [192],
 
 
 @torch.no_grad()
-def cem(cur_emb, goal_emb, gen):                                # vanilla beta=0 CEM-MPC; returns [HORIZON,10]
+def cem(cur_emb, goal_emb, gen):
     mu = torch.zeros(HORIZON, 10, device=device)
     sigma = torch.full((HORIZON, 10), 0.5, device=device)
     for _ in range(CEM_ITERS):
@@ -111,53 +97,65 @@ def cem(cur_emb, goal_emb, gen):                                # vanilla beta=0
     return mu.clamp(-1, 1)
 
 
-def trust_decision(policy, dev, is_clean, coast_budget_rng, want_coast_frac):
-    """Return True to TRUST (adopt obs), False to COAST. random-gate uses a Bernoulli matched in expectation."""
-    if policy == "blind" or policy == "clean":
-        return True
-    if policy == "oracle-gate":
-        return is_clean
-    if policy == "shell-gate":
-        return dev < TAU
-    if policy == "random-gate":
-        return coast_budget_rng.random() >= want_coast_frac     # coast with prob ~ corruption rate (matched)
-    raise ValueError(policy)
+def outage_block(K, rng):                                        # contiguous True-block of length K -> (mask, start)
+    m = np.zeros(BUDGET, bool)
+    if K <= 0:
+        return m, -1
+    start = int(rng.integers(WARMUP, max(WARMUP + 1, BUDGET - K + 1)))
+    m[start:start + K] = True
+    return m, start
 
 
-def run_arm(policy, ctype, p, want_coast_frac):
+def wrong_block(K, true_start, rng):                            # contiguous K-block NOT at the true outage start
+    m = np.zeros(BUDGET, bool)
+    cands = [s for s in range(WARMUP, BUDGET - K + 1) if s != true_start]
+    start = int(rng.choice(cands)) if cands else WARMUP
+    m[start:start + K] = True
+    return m
+
+
+def run_arm(policy, K):
     g = torch.Generator(device=device).manual_seed(0)
-    crng = np.random.default_rng(2000 + int(p * 100) + (0 if ctype == "noise" else 7))
-    rrng = np.random.default_rng(7)
-    best_rewards = []
+    orng = np.random.default_rng(3000 + K)                       # outage placement (shared across policies via fixed seed)
+    arng = np.random.default_rng(123)                            # random-action noise
+    means, finals, bests = [], [], []
     for ep in range(EPISODES):
+        outage, ostart = outage_block(0 if policy in ("clean", "random-action") else K, orng)
+        rg = wrong_block(K, ostart, np.random.default_rng(9000 + ep)) if policy == "random-gate" else None
         env = gym.make("swm/PushT-v1", render_mode="rgb_array")
         _, info = env.reset(seed=ep)
         goal_emb = encode_one(info["goal"])
-        z_hat = encode_one(env.render())                        # clean initial estimate
+        z_hat = encode_one(env.render())
         Z, A = [z_hat], []
-        best_r = -1e18
+        ep_r = []
         for step in range(BUDGET):
-            mstep = cem(z_hat, goal_emb, g)[0].cpu().numpy()    # first model-step (5 env actions)
+            if policy == "random-action":
+                mstep = arng.uniform(-1, 1, 10).astype("float32")
+            else:
+                mstep = cem(z_hat, goal_emb, g)[0].cpu().numpy()
             done = False
             for j in range(FS):
                 _, r, term, trunc, info = env.step(np.clip(mstep[2 * j:2 * j + 2], -1, 1).astype("float32"))
-                best_r = max(best_r, float(r)); done = term or trunc
+                ep_r.append(float(r)); done = term or trunc
                 if done:
                     break
-            A.append(act_emb_one(mstep))
-            frame = env.render()
-            is_clean = True if policy == "clean" else (crng.random() >= p)
-            obs = frame if is_clean else CORRUPT[ctype](frame, crng)
-            e_obs = encode_one(obs); dev = abs(float(e_obs.norm()) - SHELL)
-            if trust_decision(policy, dev, is_clean, rrng, want_coast_frac):
-                z_hat = e_obs
-            else:
-                z_hat = predict_step(Z, A)                       # coast through the distrusted frame
-            Z.append(z_hat)
+            if policy != "random-action":                       # maintain the gated state estimate
+                A.append(act_emb_one(mstep))
+                frame = env.render()
+                is_out = bool(outage[step])
+                e_obs = encode_one(blackout(frame) if is_out else frame)
+                dev = abs(float(e_obs.norm()) - SHELL)
+                trust = {"clean": True, "blind": True,
+                         "oracle-gate": not is_out,
+                         "shell-gate": dev < TAU,
+                         "random-gate": (rg is None or not bool(rg[step]))}[policy]
+                z_hat = e_obs if trust else predict_step(Z, A)
+                Z.append(z_hat)
             if done:
                 break
-        best_rewards.append(best_r); env.close()
-    return np.array(best_rewards)
+        means.append(np.mean(ep_r)); finals.append(ep_r[-1]); bests.append(np.max(ep_r))
+        env.close()
+    return {"mean": np.array(means), "final": np.array(finals), "best": np.array(bests)}
 
 
 def sem(a):
@@ -176,52 +174,59 @@ for r in range(N_CAL):
 TAU = float(np.quantile(cal, TAU_Q))
 print(f"clean shell-dev mean {np.mean(cal):.3f}; tau = q{int(TAU_Q*100)} = {TAU:.3f}\n", flush=True)
 
-# ---- clean reference (no corruption) -------------------------------------------------------------
-print("==== A2 gated CONTROL under corruption -- best reward/episode (higher=better) ====", flush=True)
-clean = run_arm("clean", "noise", 0.0, 0.0)
-print(f"  clean (no corruption): {clean.mean():.3f} +/- {sem(clean)}  succ {np.mean(clean>SUCCESS_THRESH):.2f}", flush=True)
+# ---- references: clean ceiling + random-action floor ---------------------------------------------
+print(f"==== A2-burst gated CONTROL through sensor outages ({EPISODES} eps, BUDGET {BUDGET}) ====", flush=True)
+print("  metric = MEAN reward/episode (higher=better)\n", flush=True)
+clean = run_arm("clean", 0); floor = run_arm("random-action", 0)
+print(f"  clean (no outage, CEM)   : {clean['mean'].mean():.2f} +/- {sem(clean['mean']):.2f}")
+print(f"  random-action (FLOOR)    : {floor['mean'].mean():.2f} +/- {sem(floor['mean']):.2f}")
+controls = clean['mean'].mean() - floor['mean'].mean(); c_sem = np.hypot(sem(clean['mean']), sem(floor['mean']))
+print(f"  -> planner control margin: {controls:+.2f} +/- {c_sem:.2f}  ({'CONTROLS' if controls > 2*c_sem else 'WEAK -- control conversion unlikely on PushT'})\n", flush=True)
 
-# ---- corrupted: blind / random / shell / oracle --------------------------------------------------
-res = {("clean", 0.0, "noise"): clean}
-for ctype in CTYPES:
-    for p in P_GRID:
-        print(f"\n  --- {ctype}  p={p} ---", flush=True)
-        for pol in ["blind", "random-gate", "shell-gate", "oracle-gate"]:
-            rew = run_arm(pol, ctype, p, want_coast_frac=p)
-            res[(pol, p, ctype)] = rew
-            print(f"    {pol:12}: {rew.mean():.3f} +/- {sem(rew):.3f}  succ {np.mean(rew>SUCCESS_THRESH):.2f}", flush=True)
+# ---- outage sweep --------------------------------------------------------------------------------
+res = {"clean": clean, "random-action": floor}
+for K in OUTAGE_LENS:
+    print(f"  --- outage length K={K} ({K}/{BUDGET} steps blacked out) ---", flush=True)
+    for pol in ["blind", "random-gate", "shell-gate", "oracle-gate"]:
+        res[(pol, K)] = run_arm(pol, K)
+        m = res[(pol, K)]["mean"]
+        print(f"    {pol:12}: {m.mean():.2f} +/- {sem(m):.2f}", flush=True)
 
 # ---- verdict -------------------------------------------------------------------------------------
-print("\n==== verdict (does gating the STATE ESTIMATE recover control under shift?) ====")
-cref = clean.mean()
+print("\n==== verdict (does outage-gating the STATE ESTIMATE recover control?) ====")
+cmean = clean["mean"].mean()
 allwin = True
-for ctype in CTYPES:
-    for p in P_GRID:
-        b, rnd = res[("blind", p, ctype)], res[("random-gate", p, ctype)]
-        sh, orc = res[("shell-gate", p, ctype)], res[("oracle-gate", p, ctype)]
-        d_blind = sh.mean() - b.mean(); s_blind = np.hypot(sem(sh), sem(b))     # >0: shell beats blind
-        d_orc = orc.mean() - sh.mean(); s_orc = np.hypot(sem(orc), sem(sh))     # ~0: shell ~ oracle
-        drop = cref - b.mean(); recov = (sh.mean() - b.mean()) / (drop + 1e-9)  # frac of corruption drop recovered
-        win = d_blind > s_blind and d_orc < 2 * s_orc
-        allwin &= win
-        print(f"  [{ctype} p={p}] shell-vs-blind {d_blind:+.3f}+/-{s_blind:.3f} | shell-vs-oracle {d_orc:+.3f}"
-              f"+/-{s_orc:.3f} | recovers {recov*100:.0f}% of the {drop:+.3f} corruption drop  => {'WIN' if win else 'no'}")
-print("\n  => " + ("POSITIVE: gating the state estimate on the free shell signal recovers control under shift"
-                    " (blind cost-shaping was M1.2's null; gating WHICH OBSERVATIONS the planner trusts works)."
-                    if allwin else
-                    "MIXED/NULL: see rows -- shell-gate does not clearly beat blind and/or trails oracle."))
+for K in OUTAGE_LENS:
+    b, rnd = res[("blind", K)]["mean"], res[("random-gate", K)]["mean"]
+    sh, orc = res[("shell-gate", K)]["mean"], res[("oracle-gate", K)]["mean"]
+    d_blind = sh.mean() - b.mean(); s_blind = np.hypot(sem(sh), sem(b))
+    d_rand = sh.mean() - rnd.mean(); s_rand = np.hypot(sem(sh), sem(rnd))
+    d_orc = orc.mean() - sh.mean(); s_orc = np.hypot(sem(orc), sem(sh))
+    drop = cmean - b.mean(); recov = (sh.mean() - b.mean()) / (drop + 1e-9)
+    win = d_blind > s_blind and d_orc < 2 * s_orc and controls > 2 * c_sem
+    allwin &= win
+    print(f"  [K={K}] shell-vs-blind {d_blind:+.2f}+/-{s_blind:.2f} | vs random-gate {d_rand:+.2f}+/-{s_rand:.2f}"
+          f" | vs oracle {d_orc:+.2f}+/-{s_orc:.2f} | recovers {recov*100:.0f}% of the {drop:+.2f} outage drop"
+          f"  => {'WIN' if win else 'no'}")
+if not controls > 2 * c_sem:
+    print("\n  => INCONCLUSIVE: planner ~= random-action -> control isn't estimate-bottlenecked on PushT;")
+    print("     bank A1 (perception robustness) and move the CONTROL claim to a POMDP substrate.")
+elif allwin:
+    print("\n  => POSITIVE: detecting the outage (free shell) and coasting on the world model recovers control")
+    print("     where a blind agent fails -- the deployment headline (M1.2 cost-shaping could not).")
+else:
+    print("\n  => MIXED/NULL: see rows -- coasting through the outage doesn't clearly beat blind / trails oracle.")
 
-# ---- figure --------------------------------------------------------------------------------------
-fig, ax = plt.subplots(1, len(CTYPES), figsize=(6 * len(CTYPES), 4.6), squeeze=False)
-cols = {"blind": "#c0392b", "random-gate": "#bdc3c7", "shell-gate": "#2980b9", "oracle-gate": "#27ae60"}
-for axi, ctype in zip(ax[0], CTYPES):
-    axi.axhline(cref, ls="--", color="#34495e", label=f"clean ({cref:.2f})")
-    for pol in ["blind", "random-gate", "shell-gate", "oracle-gate"]:
-        m = [res[(pol, p, ctype)].mean() for p in P_GRID]; s = [sem(res[(pol, p, ctype)]) for p in P_GRID]
-        axi.errorbar(P_GRID, m, yerr=s, fmt="-o", capsize=3, color=cols[pol], label=pol)
-    axi.set_xlabel("corruption rate p"); axi.set_ylabel("best reward / episode"); axi.set_title(f"corruption: {ctype}")
-    axi.grid(alpha=.3); axi.legend(fontsize=8)
-fig.suptitle("A2 -- control under shift: gate the planner's STATE ESTIMATE on the free shell signal",
-             fontweight="bold")
+# ---- figure: mean reward vs outage length --------------------------------------------------------
+fig, ax = plt.subplots(figsize=(7, 4.8))
+ax.axhline(cmean, ls="--", color="#34495e", label=f"clean ({cmean:.0f})")
+ax.axhline(floor["mean"].mean(), ls=":", color="#7f8c8d", label=f"random-action floor ({floor['mean'].mean():.0f})")
+cols = {"blind": "#c0392b", "random-gate": "#e1b12c", "shell-gate": "#2980b9", "oracle-gate": "#27ae60"}
+for pol in ["blind", "random-gate", "shell-gate", "oracle-gate"]:
+    m = [res[(pol, K)]["mean"].mean() for K in OUTAGE_LENS]; s = [sem(res[(pol, K)]["mean"]) for K in OUTAGE_LENS]
+    ax.errorbar(OUTAGE_LENS, m, yerr=s, fmt="-o", capsize=3, color=cols[pol], label=pol)
+ax.set_xlabel("outage length (consecutive blacked-out steps)"); ax.set_ylabel("mean reward / episode")
+ax.set_title("A2-burst -- survive sensor dropout by coasting on the world model", fontweight="bold")
+ax.set_xticks(OUTAGE_LENS); ax.grid(alpha=.3); ax.legend(fontsize=8)
 fig.tight_layout(); fig.savefig("/content/lewm-uncertainty/lewm_gated_control.png", dpi=110)
 print("\nsaved lewm_gated_control.png")

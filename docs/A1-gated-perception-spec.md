@@ -44,19 +44,31 @@ precision/recall at *detecting* corruption vs the true mask.
 - **NULL** — shell-gate ≈ blind: the shell signal is not actionable for gating either (would extend the
   controller-null to deployment, a clean negative).
 
-## Stage 2 — CONTROL under corruption (`src/gated_control.py`)
-The headline. Closed-loop CEM control (the M1.2 planner, **vanilla β=0**) to do PushT, with observations
-intermittently corrupted. We change *nothing* about the planner — we gate the **state estimate** it plans
-from: a `blind` agent re-encodes every (possibly corrupted) frame → plans from a poisoned latent; a
-`shell-gate` agent coasts (predict-forward with the executed action) through frames it distrusts → plans from
-a clean estimate. **This is the foil to M1.2:** M1.2 gated the planner's *cost* (`+β·variance`) and found
-nothing; gating *which observations the planner trusts* is a different lever.
+## Stage 2 — CONTROL through sensor outages (`src/gated_control.py`)
+The headline. Closed-loop CEM control (the M1.2 planner, **vanilla β=0**) to do PushT. We change *nothing*
+about the planner — we gate the **state estimate** it plans from. **This is the foil to M1.2:** M1.2 gated
+the planner's *cost* (`+β·variance`) and found nothing; gating *which observations the planner trusts* is a
+different lever.
 
-- **Policies:** `clean` (no corruption, the ceiling) · `blind` · `random-gate` (coast a matched-rate random
-  subset) · `shell-gate` · `oracle-gate`.
-- **Metric:** best task reward / episode (PushT coverage), mean ± SEM + success-rate; reported as the
-  fraction of the `clean→blind` corruption drop that shell-gate **recovers**. WIN = shell-gate > blind beyond
-  SEM **and** ≈ oracle. First run: noise × p∈{0.3, 0.5}, 15 episodes (~30–60 min Colab).
+**Why bursts, not iid (the first A2 run was a decoupling null).** With iid per-frame corruption, MPC
+re-plans from a fresh frame every step, so transient poisoning is self-corrected and control is unmoved even
+though the *estimate* is wrecked (A1). Estimate quality only **binds** under a **sustained outage**: a burst
+of `K` consecutive blacked-out frames with no per-step correction. Then `blind` plans from garbage for the
+whole window; `shell-gate` *detects* the outage (shell off the Gaussian shell) and **rides it out by coasting
+on the world model** (predict-forward with the executed actions) — what a world model is *for*. The story:
+survive sensor dropout by trusting the model, not the dead sensor.
+
+- **Policies:** `clean` (no outage, ceiling) · `random-action` (no planning — **floor**, confirms the planner
+  controls and the metric/episodes resolve a difference) · `blind` · `random-gate` (coast a contiguous
+  `K`-block at the **wrong** location — controls for detecting the *right* window vs just coasting `K` steps)
+  · `shell-gate` · `oracle-gate`.
+- **Metric:** **mean** reward / episode (sensitive to sustained degradation; best-of-episode hid the iid
+  effect), + final + best. Reported as the fraction of the `clean→blind` outage drop shell-gate **recovers**.
+  WIN = shell-gate > blind beyond SEM **and** ≈ oracle **and** clean ≫ random-action. Sweep `K∈{4,8}` of
+  `BUDGET=16`, 24 episodes (~60–90 min Colab).
+- **Pre-registered reads:** clean ≈ random-action → planner too weak, control isn't estimate-bottlenecked on
+  PushT → bank A1 + move the control claim to a POMDP substrate. shell ≈ oracle ≫ blind → the control
+  positive.
 - **Note (right facet matters):** the action-free *ensemble* would **fail** as this gate — M2.2 showed it is
   OOD-blind (heads agree, confidently wrong, on corrupted inputs). It is specifically the **shell/OOD** facet
   that does deployment work.
