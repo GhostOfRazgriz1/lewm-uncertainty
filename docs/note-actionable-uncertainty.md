@@ -1,25 +1,33 @@
 # A world model's uncertainty is a monitor, not a controller
 
-*Technical note. Control, sensing, and selective prediction on a frozen LeWorldModel (LeWM,
-arXiv:2603.19312) over `swm/PushT-v1`. No retraining anywhere; all signals are read off the frozen model.*
+*Technical note. Control, sensing, selective prediction, and representation-shaping on LeWorldModel (LeWM,
+arXiv:2603.19312) over `swm/PushT-v1`. §2–7 read every signal off the frozen model with no retraining; §8
+adds lightweight trained readout heads on the still-frozen encoder, and one experiment fine-tunes the
+encoder itself.*
 
 ## Abstract
 
-A JEPA world model yields several calibrated-looking uncertainty signals for free. We separate two uses:
-as an *input that should make a decision better* (a **controller**), and as a *flag for when to distrust
-the model's output* (a **monitor**). On the controller side we find a consistent negative with one
-mechanism, across four experiments on real Push-T transitions. (1) Penalizing uncertain plans does not
-improve CEM planning. For sensing — deciding when to spend a real observation under a budget — (2)
-MC-dropout variance is flat and schedules no better than random, though an oracle that looks at the truly
-surprising steps shows ~30% headroom; (3) a head that predicts one-step surprise from the *true* latent
-(held-out Spearman +0.38) collapses on the *drifted* estimate it must use at deployment; (4) training it on
-the exact deployment distribution still loses to the elapsed-time-since-observation clock. The actionable
-signal lives in observations the agent is withholding. **On the monitor side the same signals succeed.**
-(5) Used for selective prediction, MC-dropout variance abstains from in-distribution hard transitions
-(AURC 1.82 vs 2.57 random; ~60% of the oracle gap) and the latent-shell signal abstains from corrupted/OOD
-inputs (4.57 vs 8.36) — each *useless* on the other's failure mode, and their combination covers both
-(4.22, approaching the 3.79 oracle). The dividing line is the contribution: **a world model's uncertainty
-is for knowing you don't know, not for deciding better.**
+A JEPA world model yields several calibrated-looking uncertainty signals for free. We separate three uses:
+as an *input that should make a decision better* (a **controller**), as a *flag for when to distrust the
+model's output* (a **monitor**), and as a *training signal that should make the model better* (a **shaper**).
+On the controller side we find a consistent negative with one mechanism, across four experiments on real
+Push-T transitions. (1) Penalizing uncertain plans does not improve CEM planning. For sensing — deciding
+when to spend a real observation under a budget — (2) MC-dropout variance is flat and schedules no better
+than random, though an oracle that looks at the truly surprising steps shows ~30% headroom; (3) a head that
+predicts one-step surprise from the *true* latent (held-out Spearman +0.38) collapses on the *drifted*
+estimate it must use at deployment; (4) training it on the exact deployment distribution still loses to the
+elapsed-time-since-observation clock. The actionable signal lives in observations the agent is withholding.
+**On the monitor side the same signals succeed.** (5) Used for selective prediction, MC-dropout variance
+abstains from in-distribution hard transitions and the latent-shell signal abstains from corrupted/OOD
+inputs — each *useless* on the other's failure mode, and their combination covers both. (6) An **action-free
+ensemble** sharpens the monitor: its disagreement is both horizon-calibrated (growth r +0.98) and
+per-instance sharp (within-horizon Spearman +0.58), where MC-dropout is flat, and as a selective-prediction
+signal it recovers 77% of the random→oracle gap versus MC-dropout's 11%. **On the shaper side the result is
+null.** Using that same action-free objective to fine-tune the encoder end-to-end leaves the latent's
+physical structure unchanged (pose-probe R² 0.502 → 0.500±0.023 single / 0.513±0.008 ensemble over three
+seeds, all tied), and the calibrated-uncertainty loss that would *amplify* disagreement (HAUWM-style) is
+actively harmful. The dividing line is the contribution: **a world model's uncertainty is for knowing you
+don't know — not for deciding better, and not for making the model better.**
 
 ## 1. Setup
 
@@ -27,12 +35,14 @@ LeWM is an action-conditioned JEPA: a ViT encoder maps a frame to a 192-d latent
 predictor rolls it forward, and a SIGReg term keeps the latent on a Gaussian shell. It exposes two
 uncertainty signals with no retraining: **shell deviation** `|‖emb‖ − shell|` (an OOD/epistemic signal)
 and **MC-dropout variance** of the predictor (a predictive-error signal that correlates with rollout error
-at Pearson +0.41 on real transitions). These signals are weakly *calibrated*. The question is whether they
-are *actionable*, and we test two distinct uses: a **controller** (does uncertainty improve a decision —
-planning, or scheduling observations?) and a **monitor** (does it tell you when to abstain?).
+at Pearson +0.41 on real transitions). A third signal, introduced in §8, is the **disagreement of an
+action-free ensemble** of small predictors trained on the frozen latent. These signals are weakly
+*calibrated*. The question is whether they are *actionable*, across three uses: a **controller** (does
+uncertainty improve a decision — planning, or scheduling observations?), a **monitor** (does it tell you
+when to abstain?), and a **shaper** (does training with it improve the latent itself?).
 
-All experiments use random open-loop rollouts of 20 model-steps; the sensing experiments fix the action
-sequence and only decide *when to observe*.
+All controller/monitor experiments use random open-loop rollouts of 20 model-steps; the sensing experiments
+fix the action sequence and only decide *when to observe*.
 
 ## 2. Controller, control: uncertainty-aware planning is null
 
@@ -108,9 +118,60 @@ mode and blind to the other.
 
 One caveat sharpens the practical rule rather than weakening it: combining *hurts* in-distribution (combined
 2.13 vs MC-alone 1.82), because there the shell signal is pure noise. **Use the facet that matches the
-failure mode you expect; combine only when both are in play.**
+failure mode you expect; combine only when both are in play.** §8 sharpens the in-distribution (predictive)
+facet substantially.
 
-## 8. The dividing line
+## 8. Shaper: sharpen the monitor, but you cannot shape the latent
+
+The monitor's predictive facet (MC-dropout) is *calibrated but blunt* — the same under-sharpness that sank
+the sensing heads. Can a better uncertainty estimator both improve the monitor and, used as a loss, improve
+the model? We train an **action-free ensemble**: `M = 8` small heads predict `emb_t → emb_{t+k}` (horizon
+`k` embedded), on the frozen encoder, and read uncertainty off their **disagreement** `Var_i μ_i`. Action-
+free prediction is genuinely multimodal (the future is underdetermined without the action), so the heads
+have something real to disagree about.
+
+**8.1 The ensemble is sharp and calibrated (where MC-dropout is not).** Its disagreement grows with horizon
+almost perfectly (growth `r = +0.98`, tracking realized error 6.2 → 9.7) *and* ranks instances within a
+fixed horizon (within-horizon Spearman `+0.58`). MC-dropout on the same model is flat on both axes
+(`+0.02` / `+0.14`). The lever is ensemble disagreement in the action-free latent — not a special loss.
+
+**8.2 It is a much sharper monitor.** Redoing §7's selective prediction with the ensemble (within-horizon,
+confound-free): in-distribution it recovers **77%** of the random→oracle AURC gap, versus MC-dropout's
+**11%** (shell −21%, worse than random). But the ensemble is **OOD-blind** — on the mixed clean+corrupted
+pool it recovers only +23% (its heads agree, confidently wrong, on corrupted inputs), while the shell
+recovers +42% and MC +55%. The complete monitor is `z(ensemble) + z(shell)`: 77% in-distribution, 78%
+mixed. Same complementarity as §7, but the predictive facet is now sharp.
+
+**8.3 Amplifying disagreement (a calibration loss) is harmful.** The natural next move — a HAUWM-style
+horizon-calibrated-uncertainty loss `−k·Var_i μ_i` that *forces* disagreement to grow with horizon —
+backfires. At `λ=1` it diverges (the reward is unbounded; predictions explode, fixed only with `log1p` +
+gradient clipping). Stabilized, it gets growth `+1.00` *by construction* but kills sharpness (`+0.04`,
+negative at long horizons): forcing disagreement ∝ `k` uniformly overwrites the real per-instance signal.
+There is no "uncertainty collapse" to fix in a JEPA — that is an RSSM problem; here the plain ensemble is
+already calibrated, and the loss only damages it.
+
+**8.4 Shaping the encoder end-to-end is a no-op.** The representation question: does fine-tuning the encoder
+with the action-free objective make the *latent itself* encode physical state better? We linear-probe the
+PushT block pose (`info['block_pose']`, the clean target — a ridge probe shows the frozen latent already
+encodes it at R² +0.53, while it barely localizes the small agent) from three encoders: **frozen-LeWM**,
+**e2e-single** (encoder + one head, end-to-end, +VICReg anti-collapse), **e2e-ensemble** (encoder + the
+8-head ensemble). Probe with closed-form ridge — an unregularized linear probe overfits 192→3 and reports
+spurious R²<0 even on the frozen latent.
+
+| encoder | pose-probe R² (mean ± SEM, 3 seeds) |
+|---------|--------------------------------------|
+| frozen-LeWM | +0.502 (deterministic) |
+| e2e-single | +0.500 ± 0.023 |
+| e2e-ensemble | +0.513 ± 0.008 |
+
+All three are tied (single−ensemble `−0.013 ± 0.024`, −0.5 SEM). End-to-end shaping — with or without the
+ensemble — leaves pose encoding exactly where pretraining left it. *A single seed had read* `e2e-single
+0.561 / e2e-ensemble 0.450`, *a spurious 0.11 gap that would have supported a confident "the disagreement
+objective trades current-state precision for future-spread" story; three seeds erased it.* (Same single-run
+flip as the spatial-sensing false positive: always seed before claiming a mechanism.) The latent's physical
+structure is already present from SIGReg pretraining and is not improvable by this objective.
+
+## 9. The dividing line
 
 | use | experiment | result |
 |-----|-----------|--------|
@@ -118,29 +179,38 @@ failure mode you expect; combine only when both are in play.**
 | controller — sensing | MC-dropout schedule | null (≈ random; oracle shows headroom) |
 | controller — sensing | learned-on-truth head | partial (collapses on drift) |
 | controller — sensing | drift-aware head | null (< `h`-alone; uniform unbeatable) |
-| **monitor** | selective prediction | **positive (AURC ≪ random; facets complementary)** |
+| **monitor** | selective prediction (shell + MC) | **positive (AURC ≪ random; facets complementary)** |
+| **monitor** | selective prediction (ensemble) | **positive (77% of gap vs MC 11%; sharper)** |
+| shaper | HAUWM-style calibration loss | negative (harmful; overwrites the signal) |
+| shaper | end-to-end encoder fine-tune | null (pose-probe R² unchanged, 3 seeds) |
 
-One mechanism explains the split. A world model's *actionable-for-control* uncertainty — the part that
-would change which action you take or which step you look at — lives in information the agent does not have
-at decision time (the true next state); an oracle with that information captures real headroom throughout,
-but no signal computable from the agent's own state reaches it. The *monitor* use asks nothing of the
-future: it only ranks the model's current outputs by how much to trust them, and for that the same signals
-are immediately useful — MC-variance for in-distribution predictive error, the shell for distributional
-shift, combined for both. **Uncertainty tells you when you don't know; it does not tell you what to do
-about it.**
+One mechanism explains the controller split. A world model's *actionable-for-control* uncertainty — the part
+that would change which action you take or which step you look at — lives in information the agent does not
+have at decision time (the true next state); an oracle with that information captures real headroom
+throughout, but no signal computable from the agent's own state reaches it. The *monitor* use asks nothing
+of the future: it only ranks the model's current outputs by how much to trust them, and for that the same
+signals are immediately useful — sharpest from an action-free ensemble for in-distribution predictive error,
+the shell for distributional shift, combined for both. The *shaper* use asks the most and gets the least:
+the latent's structure is set by pretraining, and neither an uncertainty loss nor end-to-end action-free
+fine-tuning improves it. **Uncertainty tells you when you don't know; it does not tell you what to do about
+it, nor how to make the model know more.**
 
-## 9. Scope and what would change the conclusion
+## 10. Scope and what would change the conclusion
 
-The negatives are on *one* substrate (near-deterministic Push-T), in the *no-retrain* regime, with
-*single-MLP / MC-dropout* estimators and *one-step* targets. Each is a place the *controller* conclusion
-could move: stochastic tasks give the error-growth rate more exploitable state-dependence; a true deep
-ensemble or a recurrent belief-state estimator of *cumulative* error sees information a feed-forward head
-does not; a retrained stochastic predictor (M2) could carry a sharper intrinsic uncertainty. The *monitor*
-result is more robust — it rests only on the two facets being calibrated, which they are — and would extend
-naturally to selective *control* (abstain/replan under shift), the higher-variance follow-on.
+The negatives are on *one* substrate (near-deterministic Push-T), in the *frozen-encoder* regime for the
+controller/monitor work, with *single-MLP / MC-dropout / 8-head ensemble* estimators and *one-step* targets.
+Each is a place the *controller* conclusion could move: stochastic tasks give the error-growth rate more
+exploitable state-dependence; a recurrent belief-state estimator of *cumulative* error sees information a
+feed-forward head does not. The *shaper* null is specific to fine-tuning a pretrained SIGReg encoder on a
+deterministic task; training from scratch, or on a stochastic env where multimodality is intrinsic rather
+than action-induced, could let the action-free objective shape structure that pretraining did not already
+supply. The *monitor* result is the most robust — it rests only on the facets being calibrated, which they
+are, the ensemble sharply so — and would extend naturally to selective *control* (abstain/replan under
+shift), the higher-variance follow-on.
 
 ---
 
 *Reproduction: `src/plan_uncertainty.py` (§2), `src/active_sense.py` + `src/schedules.py` (§3–4),
-`src/surprise_head.py` (§5), `src/surprise_head_drift.py` (§6), `src/monitor.py` (§7). All Colab GPU;
-schedule logic unit-tested locally.*
+`src/surprise_head.py` (§5), `src/surprise_head_drift.py` (§6), `src/monitor.py` (§7), `src/hcu_jepa.py`
+(§8.1, §8.3), `src/monitor_ensemble.py` (§8.2), `src/tier2_pose_probe.py` + `src/tier2_diag.py` (§8.4). All
+Colab GPU; schedule logic unit-tested locally.*

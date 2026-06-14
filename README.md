@@ -142,6 +142,33 @@ and blind to the other; combined covers both.** Caveat that sharpens the rule: c
 (2.13 vs MC 1.82) — use the facet matching your failure mode, combine only when both are in play.
 **POSITIVE** — the "complementary facets" analysis becomes an actionable monitor.
 
+**M2 — can uncertainty *improve the model*? (HCU-for-JEPA).** The monitor's predictive facet (MC-dropout) is
+calibrated but blunt; M2 asks whether a sharper estimator both improves the monitor and, used as a loss /
+training signal, improves the model itself. **Tier 1 (`src/hcu_jepa.py`, `lewm_hcu.png`) — an action-free
+ensemble is the sharp signal.** Eight small heads predict `emb_t → emb_{t+k}` on the frozen encoder; their
+disagreement is horizon-calibrated (growth **r +0.98**, tracks realized err 6.2→9.7) *and* per-instance
+sharp (within-horizon Spearman **+0.58**), where MC-dropout is flat (+0.02 / +0.14) — solving the
+under-sharpness that dogged M1.3–1.5. Contrarian twist: the HAUWM-style **calibration loss** `−k·Var_i μ_i`
+that *forces* disagreement to grow with horizon is **unnecessary and harmful** — it diverges at λ=1
+(unbounded reward; fixed with log1p + grad-clip), and stabilized it gets growth +1.00 *by construction* but
+kills sharpness (+0.04, negative at long k). The plain ensemble is already calibrated; there is no
+"uncertainty collapse" to fix in a JEPA (that's an RSSM problem). **M2.2 (`src/monitor_ensemble.py`,
+`lewm_monitor_ensemble.png`) — the ensemble is a much sharper monitor.** Redoing M1.6's selective prediction
+within-horizon (confound-free): in-dist it recovers **77%** of the random→oracle AURC gap vs MC-dropout's
+**11%** (shell −21%). But it is **OOD-blind** — on the mixed clean+corrupted pool it recovers only +23%
+(heads agree, confidently wrong, on corruption), where shell +42% / MC +55%; `z(ens)+z(shell)` combined is
+best (77% in-dist, 78% mixed). Same complementarity as M1.6, predictive facet now sharp. **Tier 2
+(`src/tier2_pose_probe.py`, `src/tier2_diag.py`, `lewm_tier2_pose.png`) — shaping the latent is a NULL.**
+Does fine-tuning the encoder end-to-end with the action-free objective make the *latent itself* encode
+physical state better? Ridge-probe the PushT block pose (the frozen latent already encodes it at R² +0.53;
+it barely localizes the small agent) from three encoders. Over **3 seeds**: frozen **+0.502** / e2e-single
+**+0.500 ± 0.023** / e2e-ensemble **+0.513 ± 0.008** — **all tied** (single−ensemble −0.5 SEM). A single
+seed had read 0.561 / 0.450 (a spurious 0.11 gap that would have supported a confident "disagreement trades
+current-state precision for future-spread" story); seeding erased it. The latent's structure is set by
+SIGReg pretraining and is not improvable by this objective. (Two bugs caught first: an unregularized Adam
+probe overfit 192→3, giving R²<0 even on the frozen latent → closed-form ridge; wrong pose field →
+`info['block_pose']`.)
+
 **Verdict.** The calibration story is: *world models carry different, incomplete, calibrated facets of "I
 don't know" (LeWM OOD-geometry; MC-dropout predictive-error; ours `u_hat`) — but they are hard to sharpen
 (heteroscedastic head failed, structural) and hard to act on (planning-penalty null on a working planner).*
@@ -162,7 +189,12 @@ trying to avoid. **M1.6 flips the sign on the *other* use of uncertainty:** used
 prediction) rather than a *controller*, the same signals work — MC-variance abstains from in-dist hard
 transitions, the shell from OOD/corruption, combined covers both (AURC ≪ random, approaching oracle). The
 dividing line is the result: **a world model's uncertainty is a monitor, not a controller — it tells you
-when you don't know, not what to do about it.** Full writeup: `docs/note-actionable-uncertainty.md`.
+when you don't know, not what to do about it.** **M2 adds the third use — *shaper* — and completes the
+thesis:** an action-free ensemble *sharpens* the monitor (77% of the random→oracle gap vs MC-dropout's 11%),
+but neither a calibration loss (harmful, overwrites the signal) nor end-to-end fine-tuning (pose-probe null,
+3 seeds) makes the *model* better. Uncertainty is a **monitor/readout — not a controller, and not a
+constructive training signal**: it reads the latent, it does not reshape it for the better. Full writeup:
+`docs/note-actionable-uncertainty.md`.
 
 ## Repo layout
 
@@ -176,11 +208,17 @@ src/schedules.py         # M1.3 — pure look-scheduling policies (no torch/swm)
 src/surprise_head.py     # M1.4 — learned (z,a)->surprise head + held-out corr + deploy; Colab GPU
 src/surprise_head_drift.py  # M1.5 — drift-aware head (z,a,h) trained on the deploy distribution; Colab GPU
 src/monitor.py           # M1.6 — uncertainty as a runtime monitor (selective prediction); Colab GPU
+src/hcu_jepa.py          # M2 Tier 1 — action-free ensemble (sharp+calibrated) + HCU loss (harmful); Colab GPU
+src/monitor_ensemble.py  # M2.2 — M1.6 monitor redux with the ensemble (sharper predictive facet); Colab GPU
+src/tier2_pose_probe.py  # M2 Tier 2 — does e2e action-free shaping improve the latent's pose encoding? (null, 3 seeds)
+src/tier2_diag.py        # M2 Tier 2 diagnostic — ridge-probe each obs field for the real pose target
 tests/test_schedules.py  # local unit tests for the scheduling logic — python tests/test_schedules.py
 docs/M1.4-surprise-head-spec.md  # M1.4 design spec
 docs/M1.5-drift-aware-spec.md    # M1.5 design spec
 docs/M1.6-monitor-spec.md        # M1.6 design spec
-docs/note-actionable-uncertainty.md  # technical note: the M1.2-1.5 negative arc
+docs/M2-hcu-jepa-spec.md         # M2 Tier 1 design spec
+docs/M2-tier2-pose-probe-spec.md # M2 Tier 2 design spec
+docs/note-actionable-uncertainty.md  # technical note: the full arc (controller null / monitor positive / shaper null)
 ```
 
 ## Status
@@ -195,4 +233,6 @@ M0 scripts are **written-for-Colab and untested** (the sims don't run on the Win
 
 **M1.6 (runtime monitor)** is **written-for-Colab and untested on GPU** — the *positive-complement* experiment. `src/monitor.py` reuses the rig; selective prediction (risk-coverage/AURC) on in-dist + corrupted transitions. Run: `python src/monitor.py`. *(M1.6 ran: POSITIVE — uncertainty is a monitor, not a controller; complementary facets. See Results.)*
 
-**M1.3-Cube (#3 flip-test)** is **written-for-Colab and untested on GPU**. `src/active_sense_cube.py` reruns the M1.3 sensing comparison on the contact-rich `quentinll/lewm-cube` checkpoint (self-configuring: auto-discovers the swm Cube env, derives frameskip from the 25-d action). Tests whether the sensing null was a Push-T determinism artifact (bigger oracle headroom? can MC-variance read any of it?). Run: `python src/active_sense_cube.py`. *Caveat: cube env id + load_lewm config compatibility resolve on first Colab run.*
+**M1.3-Cube (#3 flip-test)** is **written-for-Colab and untested on GPU**. `src/active_sense_cube.py` reruns the M1.3 sensing comparison on the contact-rich `quentinll/lewm-cube` checkpoint (self-configuring: auto-discovers the swm Cube env, derives frameskip from the 25-d action). Tests whether the sensing null was a Push-T determinism artifact (bigger oracle headroom? can MC-variance read any of it?). Run: `python src/active_sense_cube.py`. *Caveat: cube env id + load_lewm config compatibility resolve on first Colab run.* *(BLOCKED: OGBench Cube rendering on Colab is a rabbit hole — OpenGL ctx → renderer segfault → numpy conflict; dropped, script left in repo.)*
+
+**M2 (HCU-for-JEPA)** ran on Colab. **Tier 1** (`src/hcu_jepa.py`): action-free ensemble is sharp+calibrated (r +0.98 / Spearman +0.58); HCU calibration loss harmful. **M2.2** (`src/monitor_ensemble.py`): ensemble monitor recovers 77% of the AURC gap vs MC's 11% in-dist, OOD-blind on mixed, combined best. **Tier 2** (`src/tier2_pose_probe.py`): end-to-end shaping is a NULL — frozen 0.502 / single 0.500±0.023 / ensemble 0.513±0.008 (3 seeds, all tied); the single-seed PARTIAL was noise. See Results / `docs/note-actionable-uncertainty.md`.
