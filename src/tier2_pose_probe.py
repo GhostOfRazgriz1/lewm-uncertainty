@@ -38,6 +38,7 @@ ENC_EPOCHS, ENC_LR, ENC_BS, MAX_PAIRS = 8, 1e-4, 16, 3000        # encoder fine-
 PROBE_EPOCHS, PROBE_LR = 300, 1e-2
 VIC_VAR, VIC_COV = 1.0, 0.04                                      # VICReg anti-collapse weights
 DATA_CACHE = "/content/lewm-uncertainty/_tier2_data_v2.pt"        # v2: block_pose labels (v1 had wrong field)
+SEEDS = [0, 1, 2]                                                 # fine-tune seeds -> mean+/-SEM (single-seed flipped before)
 torch.manual_seed(0); random.seed(0)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 prep = TT.Compose([TT.ToTensor(), TT.Resize((224, 224)), TT.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
@@ -166,43 +167,69 @@ smean, sstd = states.reshape(-1, S).mean(0), states.reshape(-1, S).std(0) + 1e-6
 ntr = int(0.8 * N_ROLLOUTS); itr, iev = list(range(ntr)), list(range(ntr, N_ROLLOUTS))
 print(f"pose dim {S}; train {len(itr)} / eval {len(iev)} rollouts", flush=True)
 
-# ---- 1) frozen-LeWM probe (baseline, cheap, always runs) ----------------------------------------
+# ---- 1) frozen-LeWM probe (baseline; deterministic given fixed data + closed-form ridge) --------
 print("\n[1/3] frozen-LeWM probe ...", flush=True)
 frozen, cfg = load_lewm("/content/le-wm", device=device)
-res = {}
-res["frozen-LeWM"] = probe(frozen, frames, states, itr, iev, smean, sstd)
-print(f"  frozen-LeWM: probe MSE {res['frozen-LeWM'][0]:.4f}  R2 {res['frozen-LeWM'][1]:.3f}", flush=True)
+res = {"frozen-LeWM": [probe(frozen, frames, states, itr, iev, smean, sstd)]}
+print(f"  frozen-LeWM: MSE {res['frozen-LeWM'][0][0]:.4f}  R2 {res['frozen-LeWM'][0][1]:+.3f}", flush=True)
+del frozen
+if device == "cuda":
+    torch.cuda.empty_cache()
 
-# ---- 2) e2e-single + 3) e2e-ensemble (heavy: ViT fine-tune) -------------------------------------
-print("\n[2/3] e2e-single fine-tune ...", flush=True)
-m1, _ = load_lewm("/content/le-wm", device=device)
-res["e2e-single"] = probe(fine_tune(m1, 1, frames, itr), frames, states, itr, iev, smean, sstd)
-print(f"  e2e-single: probe MSE {res['e2e-single'][0]:.4f}  R2 {res['e2e-single'][1]:.3f}", flush=True)
-print("\n[3/3] e2e-ensemble fine-tune ...", flush=True)
-m2, _ = load_lewm("/content/le-wm", device=device)
-res["e2e-ensemble"] = probe(fine_tune(m2, M, frames, itr), frames, states, itr, iev, smean, sstd)
-print(f"  e2e-ensemble: probe MSE {res['e2e-ensemble'][0]:.4f}  R2 {res['e2e-ensemble'][1]:.3f}", flush=True)
+# ---- 2) e2e-single + 3) e2e-ensemble across SEEDS (heavy: ViT fine-tune x 2 x len(SEEDS)) -------
+res["e2e-single"], res["e2e-ensemble"] = [], []
+for s in SEEDS:
+    for name, nh in (("e2e-single", 1), ("e2e-ensemble", M)):
+        print(f"\n[seed {s}] {name} fine-tune ...", flush=True)
+        torch.manual_seed(s); random.seed(s)                       # reseed BOTH (head init + pair shuffle)
+        m, _ = load_lewm("/content/le-wm", device=device)
+        r = probe(fine_tune(m, nh, frames, itr), frames, states, itr, iev, smean, sstd)
+        res[name].append(r)
+        print(f"  {name}[seed {s}]: MSE {r[0]:.4f}  R2 {r[1]:+.3f}", flush=True)
+        del m
+        if device == "cuda":
+            torch.cuda.empty_cache()
 
 # ---- verdict ------------------------------------------------------------------------------------
-print("\n==== M2 Tier 2 -- linear pose-probe (standardized MSE lower=better; R2 higher=better) ====")
+def agg(key):                                                     # -> (mse_mean, mse_sem, r2_mean, r2_sem)
+    a = np.array(res[key], dtype=float); n = len(a)               # rows = seeds, cols = (mse, r2)
+    if n == 1:
+        return float(a[0, 0]), 0.0, float(a[0, 1]), 0.0
+    sem = lambda c: float(a[:, c].std(ddof=1) / math.sqrt(n))
+    return float(a[:, 0].mean()), sem(0), float(a[:, 1].mean()), sem(1)
+
+
+print("\n==== M2 Tier 2 -- ridge pose-probe (R2 higher=better; mean+/-SEM over seeds) ====")
+agm = {n: agg(n) for n in ["frozen-LeWM", "e2e-single", "e2e-ensemble"]}
 for n in ["frozen-LeWM", "e2e-single", "e2e-ensemble"]:
-    print(f"  {n:14}: MSE {res[n][0]:.4f}   R2 {res[n][1]:+.3f}")
-fr2, sr2, er2 = res["frozen-LeWM"][1], res["e2e-single"][1], res["e2e-ensemble"][1]
-print("\n  verdict (R2 higher=better; frozen block_pose R2~0.53 is the bar):")
-print(f"    shaping vs frozen : e2e-ensemble R2 {er2:+.3f} {'>' if er2 > fr2 else '<='} frozen {fr2:+.3f}")
-print(f"    ensemble vs single: e2e-ensemble R2 {er2:+.3f} {'>' if er2 > sr2 else '<='} e2e-single {sr2:+.3f}")
-if er2 > fr2 + 0.02 and er2 > sr2 + 0.01:
-    print("    WIN -- end-to-end ENSEMBLE shaping improves the latent's physical structure beyond frozen + single.")
-elif max(sr2, er2) > fr2 + 0.02:
-    print("    PARTIAL -- end-to-end shaping helps, but the ensemble adds little over single (it's the e2e, not the uncertainty).")
+    mm, ms, rm, rs = agm[n]
+    tag = f"(n={len(res[n])} seeds)" if len(res[n]) > 1 else "(deterministic)"
+    print(f"  {n:14}: MSE {mm:.4f}+/-{ms:.4f}   R2 {rm:+.3f}+/-{rs:.3f}  {tag}")
+
+fr2 = agm["frozen-LeWM"][2]
+srm, srs = agm["e2e-single"][2], agm["e2e-single"][3]
+erm, ers = agm["e2e-ensemble"][2], agm["e2e-ensemble"][3]
+d = srm - erm; dsem = math.sqrt(srs ** 2 + ers ** 2)             # single-minus-ensemble gap +/- combined SEM
+print("\n  verdict (frozen block_pose R2 is the bar):")
+print(f"    shaping vs frozen : e2e-single R2 {srm:+.3f}+/-{srs:.3f}  vs  frozen {fr2:+.3f}")
+print(f"    ensemble vs single: single-minus-ensemble = {d:+.3f} +/- {dsem:.3f}  ({d / (dsem + 1e-9):+.1f} SEM)")
+if erm > fr2 + 0.02 and erm - srm > 2 * dsem:
+    print("    WIN -- end-to-end ENSEMBLE shaping improves pose structure beyond frozen AND single (>2 SEM).")
+elif d > 2 * dsem:
+    print("    CLEAN NEGATIVE -- the ENSEMBLE objective HURTS pose encoding vs plain e2e (>2 SEM).")
+    print("                      uncertainty mechanism is a monitor/readout, not a constructive training signal.")
+elif srm > fr2 + 0.02:
+    print("    PARTIAL -- plain e2e nudges pose up; ensemble adds nothing (frozen comparison regularizer-confounded).")
 else:
-    print("    NULL -- shaping does not beat the frozen LeWM latent: its structure is hard to improve (Tier-1 uncertainty was the win).")
+    print("    NULL -- shaping does not beat the frozen LeWM latent: its structure is hard to improve.")
 
 # ---- figure -------------------------------------------------------------------------------------
 fig, ax = plt.subplots(1, 2, figsize=(10, 4.2))
 names = ["frozen-LeWM", "e2e-single", "e2e-ensemble"]; cols = ["#7f8c8d", "#e67e22", "#8e44ad"]
-ax[0].bar(names, [res[n][0] for n in names], color=cols); ax[0].set_ylabel("probe MSE (lower=better)"); ax[0].set_title("Pose-probe error")
-ax[1].bar(names, [res[n][1] for n in names], color=cols); ax[1].set_ylabel("probe R2 (higher=better)"); ax[1].set_title("Pose-probe R2")
+ax[0].bar(names, [agm[n][0] for n in names], yerr=[agm[n][1] for n in names], capsize=4, color=cols)
+ax[0].set_ylabel("probe MSE (lower=better)"); ax[0].set_title("Pose-probe error (mean +/- SEM)")
+ax[1].bar(names, [agm[n][2] for n in names], yerr=[agm[n][3] for n in names], capsize=4, color=cols)
+ax[1].set_ylabel("probe R2 (higher=better)"); ax[1].set_title("Pose-probe R2 (mean +/- SEM)")
 for a in ax:
     a.grid(alpha=.3, axis="y"); a.tick_params(axis="x", labelrotation=15)
 fig.suptitle("M2 Tier 2 -- does end-to-end action-free shaping improve the JEPA latent's pose encoding?", fontweight="bold")
