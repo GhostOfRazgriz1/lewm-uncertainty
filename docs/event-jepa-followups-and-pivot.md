@@ -67,3 +67,29 @@ One thesis across substrates and representation types: **world-model representat
 what *happened*, but not what can be *reached* or *controlled* — and that reachability gap is the recurring
 obstacle to using them for control.** The Event-JEPA result is now the cleanest single demonstration of it,
 because the oracle-subgoal contrast *quantifies the headroom* the descriptive code fails to capture.
+
+## (C5) Actionable events — the constructive validation (`src/c5_affordance.py`)
+The pivot's claim was that the fix is to LEARN affordance semantics. C5 builds them — an affordance head
+`g(z) → P(reachable(e) within K)` (per-event acc 0.92–0.93) and an event inverse model `π(a | z, e)` — and
+plans the pickup→drop subgoal sequence with the LEARNED inverse model, vs dense-CEM and the C3 oracle.
+
+**8 seeds, affordance-event success:** `0.00, 1.00, 1.00, 0.95, 0.00, 1.00, 1.00, 1.00`
+→ **6/8 reach oracle-level (≥0.95), 2/8 collapse (0.00).** Dense ~0.19 throughout; oracle ~0.93.
+
+- **The pivot's method works:** learned actionable events **match or beat the hand-coded oracle in 75% of
+  runs** — something descriptive event-CEM *never* did (always ≈ dense in C3). The missing ingredient
+  (reachability/affordance) is learnable and closes C3's gap.
+- **Honest caveat:** the minimal greedy inverse-model controller is **bimodal** — when BC converges it
+  solves every episode, when it doesn't it fails every episode (2/8 collapses; BC instability on the 50%-
+  random mixed-policy data). Robustness (data filtering / ensemble / CEM-around-π / affordance-gating) is
+  the clear next step — an engineering problem, not a refutation.
+
+## Locked reframe
+- **DEAD:** "a sparse event bottleneck (transition compression) improves planning." (C0/C1/C3 — never beat dense.)
+- **ADOPTED:** *"Descriptive event abstraction is insufficient for control; small world models need
+  actionable event abstractions grounded in reachability."* Working title: **Predictive Events Are Not
+  Plannable Events** (alt: *From Descriptive to Actionable Events in Small World Models*).
+- **Evidence arc (clean, reviewer-facing):** events exist + are descriptively discoverable (C1, recall ~0.9)
+  → descriptive events don't plan, oracle affordances do, ~7× gap (C3) → learned reachability/affordance
+  closes the gap to oracle in 6/8 runs (C5). Measured gap + a method designed to close it that does.
+- **Next:** robustify the actionable-event controller (kill the 2/8 collapse), then scale beyond the toy.
