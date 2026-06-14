@@ -36,20 +36,25 @@ becomes the cross-substrate breadth story, not a loss.
 ## Colab setup (Runtime → GPU)
 
 ```python
-# 1. clone TD-MPC2 (env wiring + agent code) and this repo (the gate script)
+# CELL 1 — clone TD-MPC2 (env wiring + agent code) and this repo (the gate script)
 !git clone -q https://github.com/nicklashansen/tdmpc2 /content/tdmpc2
 !git clone -q https://github.com/GhostOfRazgriz1/lewm-uncertainty /content/lewm-uncertainty
-
-# 2. deps — DMControl path only (state obs); avoids the gym==0.21.0 / Meta-World hell entirely.
-#    Pins mirror tdmpc2/docker/environment.yaml's DMC subset; tensordict/torchrl left unpinned to
-#    match Colab's torch (the one fragile spot — see "If import fails" below).
-!pip install -q dm-control==1.0.16 mujoco==3.1.2 gymnasium==0.29.1 \
-    hydra-core==1.3.2 hydra-submitit-launcher==1.2.0 submitit==1.5.1 omegaconf==2.3.0 \
-    tensordict torchrl kornia==0.7.2 termcolor tqdm imageio imageio-ffmpeg huggingface_hub
 ```
 
 ```python
-# 3. run the gate (recommended first task: cheetah-run — robustly competent, simple physics)
+# CELL 2 — deps. CONFIRMED-WORKING pins (Colab, validated 2026-06: cheetah-run reproduces 853 vs 850).
+#   DMControl path only (state obs) -> avoids the gym==0.21.0 / Meta-World hell.
+#   The TD-MPC2 HF checkpoints were saved with the torch-2.5 / tensordict-0.6 era; newer tensordict
+#   drops the Ensemble's __batch_size meta-key and api_model_conversion() KeyErrors. So pin the stack:
+!pip install -q torch==2.5.1 torchvision==0.20.1 tensordict==0.6.2 torchrl==0.6.0 \
+    dm-control==1.0.16 mujoco==3.1.2 gymnasium==0.29.1 \
+    hydra-core==1.3.2 hydra-submitit-launcher==1.2.0 submitit==1.5.1 omegaconf==2.3.0 \
+    kornia==0.7.2 termcolor tqdm imageio imageio-ffmpeg huggingface_hub
+print(">>> torch was reinstalled: Runtime > Restart session, then run CELL 3 (do NOT re-run installs).")
+```
+
+```python
+# CELL 3 — run the gate (downloads the checkpoint itself). cheetah-run = robustly competent, simple physics.
 !cd /content && python /content/lewm-uncertainty/src/b0_tdmpc2_derisk.py \
     --task cheetah-run --seed 1 --episodes 20
 ```
@@ -81,9 +86,11 @@ scatter) and `_records.pt` (per-step `z`, `q_disag`, `onestep`, returns) for dow
 ## If GATE 1 fails (triage, in order)
 
 1. **Wrong/over-noisy eval** — confirm a GPU runtime (`torch.cuda.is_available()`); the script asserts it.
-2. **`tensordict`/`torchrl` import error** — the one fragile pin. TD-MPC2's `docker/environment.yaml`
-   uses `tensordict-nightly==2025.1.1` / `torchrl-nightly==2025.1.1`. If the stable wheels mismatch
-   Colab's torch, pin: `pip install tensordict==0.6.* torchrl==0.6.*` (or the nightlies). Restart runtime after.
+2. **`agent.load()` -> `KeyError: '_Qs.params.__batch_size'` in `api_model_conversion`** — newer
+   `tensordict` dropped the Ensemble meta-keys the HF checkpoints were saved with. Fixed by the CELL 2
+   pins (`torch==2.5.1` / `tensordict==0.6.2` / `torchrl==0.6.0`) + a runtime restart. If those wheels
+   ever fall off Colab, the next combo to try is `tensordict==0.7.2` / `torchrl==0.7.2` (the TD-MPC2
+   nightly sits between 0.6 and 0.7).
 3. **`numpy` ABI clash** after install → `Runtime → Restart`, then re-run the gate cell (skip pip).
 4. **`mujoco`/`dm_control` GL** → the gate sets `MUJOCO_GL=egl` and uses **state obs + no video**, so
    no rendering is needed for stepping. If physics init still fails, try `MUJOCO_GL=osmesa`.
@@ -116,5 +123,5 @@ published number.
 ## Status
 
 - [x] API verified against TD-MPC2 source (`encode`/`next`/`Q(return_type='all')`/`load`, `rand_act`, hydra `compose`+`parse_cfg`, HF checkpoint naming `dmcontrol/{task}-{seed}.pt`).
-- [ ] **Run the gate** → record GO / NO-GO(1) / NO-GO(2).
-- [ ] On GO: write `B1` (E1 monitor) spec + script.
+- [x] **Gate run → GO** (cheetah-run, Colab, 2026-06): competence 853.4 ± 17.5 vs published ~850, random floor 7.4; Q-ensemble disag CV 11.8, Spearman(disag, one-step err) **+0.55** — free live signal, no head trained.
+- [ ] On GO: write `B1` (E1 monitor under shift) spec + script.
