@@ -89,7 +89,25 @@ supervised-quality monitor for free." If supervised >> free, that's an honest li
 - Reuse B0's rollout+signal-dump loop and the M2.2 AURC helpers verbatim.
 - No control here. No training of the agent. Only the tiny supervised detector trains.
 
+## First cut (Colab, cheetah-run) — PARTIAL, sharp mechanism
+- disag **detects noise/subtle** (AUROC 0.57→0.73 w/ σ; subtle 0.71), beats motion-drift, positive
+  partial Spearman — and ≈ supervised at low severity.
+- disag is **BLIND to blackout** (AUROC 0.32, worse than chance): Q-heads agree confidently on the
+  degenerate zero-latent = **M2.2 ensemble-OOD-blindness, reproduced on TD-MPC2**.
+- drift is the mirror: ok on noise, **catastrophic on blackout** (−96% AURC; a stuck estimate has low
+  drift, max error — the M1.4/M1.5 lesson).
+- The same-family supervised baseline was **unfairly easy** (blackout z = giveaway → AUROC 1.0).
+
+## Refinement (current script) — close the gap
+- **Free OOD facet** = diag-Mahalanobis of z to the clean-latent cloud (SimNorm analog of the shell) —
+  should catch blackout label-free. **COMBINED** = z(disag)+z(ood) = predictive + OOD (M1.6/M2.2).
+- **Fair supervised** = cross-family transfer (train on noise, test on blackout, & vice versa). Free
+  signals need no corruption labels; cross-family supervised should collapse.
+- WIN = combined detection AUROC > 0.7 across all shifts; ood rescues blackout; free combined ≥ fair
+  (cross-family) supervised → a **complete free monitor on a competent WM**, complementary-facets law
+  reproduced on a second model class.
+
 ## Next
-- [x] `src/b1_monitor.py` written (syntax-checked; run on Colab).
-- [ ] Run on Colab → record per-shift detection AUROC / AURC / partial / free-vs-supervised; verdict.
+- [x] `src/b1_monitor.py` written + refined (OOD facet + combined + fair baseline; syntax-checked).
+- [ ] Re-run refined → does the OOD facet rescue blackout and does combined beat cross-family supervised?
 - [ ] On WIN → `B2` spec = E2 (uncertainty-cost MPC / trust-gating under sustained outage — the swing).
