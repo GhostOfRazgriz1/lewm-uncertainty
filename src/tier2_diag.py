@@ -85,22 +85,28 @@ def enc(fr):
     return torch.cat(Z).cpu()
 
 
-Z = enc(frames); n = len(Z); tr = slice(0, int(0.8 * n)); ev = slice(int(0.8 * n), n)
-print("\n=== frozen-LeWM linear-probe R2 per candidate field (the real pose should be >> 0) ===")
-for k in cands:
-    Y = np.stack(fields[k]).astype("float32")
-    if Y.shape[0] != n:
-        print(f"  {k}: length mismatch ({Y.shape[0]} vs {n}), skip"); continue
-    if Y.std() < 1e-6:
-        print(f"  {k}: ~constant (std {Y.std():.2g}), skip"); continue
+Z = enc(frames).numpy().astype("float64"); n = len(Z); ntr = int(0.8 * n)
+
+
+def ridge_r2(Y):                                               # closed-form ridge probe, best over alpha sweep
     Ys = (Y - Y.mean(0)) / (Y.std(0) + 1e-6)
-    Zt, Yt = Z[tr], torch.tensor(Ys[tr])
-    lin = nn.Linear(192, Ys.shape[1]); opt = torch.optim.Adam(lin.parameters(), 1e-2)
-    for _ in range(300):
-        loss = ((lin(Zt) - Yt) ** 2).mean(); opt.zero_grad(); loss.backward(); opt.step()
-    with torch.no_grad():
-        p = lin(Z[ev]); Ye = torch.tensor(Ys[ev])
-        r2 = (1 - (p - Ye).pow(2).sum(0) / ((Ye - Ye.mean(0)).pow(2).sum(0) + 1e-9)).mean().item()
-    print(f"  {k:18} (dim {Ys.shape[1]:2}): R2 {r2:+.3f}   ex {Y[0][:6]}")
-print("\n-> the field with R2 >> 0 is the real pose. set get_state to use it (and confirm the protocol works:")
-print("   frozen LeWM should probe pose with R2>0), then re-run tier2_pose_probe.py.")
+    Ztr, Ytr, Zev, Yev = Z[:ntr], Ys[:ntr], Z[ntr:], Ys[ntr:]
+    zm, ym = Ztr.mean(0), Ytr.mean(0); Zc = Ztr - zm
+    best = -1e9
+    for a in (1.0, 10.0, 100.0, 1000.0):
+        W = np.linalg.solve(Zc.T @ Zc + a * np.eye(Zc.shape[1]), Zc.T @ (Ytr - ym))
+        pred = (Zev - zm) @ W + ym
+        r2 = float((1 - ((pred - Yev) ** 2).sum(0) / (((Yev - Yev.mean(0)) ** 2).sum(0) + 1e-9)).mean())
+        best = max(best, r2)
+    return best
+
+
+print("\n=== frozen-LeWM RIDGE-probe R2 per candidate field (closed-form, alpha-swept; real pose should be >0) ===")
+for k in cands:
+    Y = np.stack(fields[k]).astype("float64")
+    if Y.shape[0] != n or Y.std() < 1e-6:
+        print(f"  {k:18}: skip (len/const)"); continue
+    print(f"  {k:18} (dim {Y.shape[1]:2}): R2 {ridge_r2(Y):+.3f}   ex {Y[0][:6]}")
+print("\n-> if frozen LeWM now probes state/block_pose at R2>0, the Adam probe was overfitting:")
+print("   fix tier2_pose_probe.py to RIDGE + the right field + re-run. If still <0, the latent doesn't")
+print("   linearly encode pose and Tier 2's premise fails -> consolidate instead.")
