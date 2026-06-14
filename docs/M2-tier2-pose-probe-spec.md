@@ -12,17 +12,22 @@ better? Linear-probe protocol (the paper's "probing of physical quantities").
 - **e2e-ensemble** (ours) — fine-tune encoder + the action-free ensemble end-to-end.
 
 ## Method
-- **Pose labels:** PushT's native low-dim state (agent + block pose), pulled from the env `obs`/`info` in
-  the data-gen phase and asserted low-dim (**pose-gate runs first**, before any training).
+- **Pose labels:** PushT's native **`info['block_pose']`** (the 3-d T-block pose `[x, y, angle]`), pulled in
+  the data-gen phase and shape-asserted (**pose-gate runs first**, before any training). A diagnostic
+  (`tier2_diag.py`) ridge-probed every candidate low-dim field on the frozen latent: `block_pose` is the
+  clean target (**R² +0.53**); the full 7-d `state` is only +0.06 and `pos_agent` is **negative** — the
+  latent encodes the big T-block well but barely localizes the small pusher, so we probe block_pose alone.
 - **Fine-tune:** `L_pred` (action-free `emb_t → emb_{t+k}`, both encoded by the *training* encoder, no
   stop-grad, matching LeWM) + **VICReg variance/covariance** anti-collapse (stands in for SIGReg — simpler
   and robust; the e2e-single-vs-e2e-ensemble comparison is clean since both use it). Encode is treated as a
   differentiable black box (`model.encode`), so no LeWM internals are reverse-engineered.
-- **Probe:** freeze encoder, encode frames → latents, train a **linear** probe latent→standardized-state,
-  report held-out **MSE** (lower=better) and **R²** (higher=better).
+- **Probe:** freeze encoder, encode frames → latents, fit a **closed-form ridge** probe latent→standardized
+  block_pose (alpha-swept `{1,10,100,1000}`, same protocol for all three encoders), report held-out **MSE**
+  (lower=better) and **R²** (higher=better). Ridge, not Adam — an unregularized Adam linear probe overfits
+  192→3 and reported spurious R² < 0 even on the frozen latent that *does* encode pose.
 
-## Verdict
-- **WIN** — `e2e-ensemble` MSE < frozen-LeWM (shaping helps) **and** < e2e-single (the ensemble/uncertainty-
+## Verdict (R², frozen block_pose R² ≈ 0.53 is the bar)
+- **WIN** — `e2e-ensemble` R² > frozen-LeWM (shaping helps) **and** > e2e-single (the ensemble/uncertainty-
   awareness, not just end-to-end, is what helps).
 - **PARTIAL** — e2e helps but the ensemble adds little over single (it's the end-to-end, not the uncertainty).
 - **NULL (legitimate, even expected)** — shaping doesn't beat the frozen LeWM latent → its structure is hard
@@ -39,4 +44,5 @@ better? Linear-probe protocol (the paper's "probing of physical quantities").
   regularizer difference; the *clean* claim is e2e-ensemble vs e2e-single (same regularizer).
 
 ## Code
-`src/tier2_pose_probe.py`. Colab GPU. Caches data (`_tier2_data.pt`).
+`src/tier2_pose_probe.py`. Colab GPU. Caches data (`_tier2_data_v2.pt` — v2 carries block_pose labels; the
+v1 cache held the wrong field). Diagnostic that found the right field: `src/tier2_diag.py`.

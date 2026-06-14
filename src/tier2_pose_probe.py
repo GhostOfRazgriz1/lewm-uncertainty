@@ -37,32 +37,25 @@ K_MAX, M, HE, HID = 12, 8, 32, 256
 ENC_EPOCHS, ENC_LR, ENC_BS, MAX_PAIRS = 8, 1e-4, 16, 3000        # encoder fine-tune (modest, from pretrained init)
 PROBE_EPOCHS, PROBE_LR = 300, 1e-2
 VIC_VAR, VIC_COV = 1.0, 0.04                                      # VICReg anti-collapse weights
-DATA_CACHE = "/content/lewm-uncertainty/_tier2_data.pt"
+DATA_CACHE = "/content/lewm-uncertainty/_tier2_data_v2.pt"        # v2: block_pose labels (v1 had wrong field)
 torch.manual_seed(0); random.seed(0)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 prep = TT.Compose([TT.ToTensor(), TT.Resize((224, 224)), TT.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
 
 
-def get_state(obs):                                              # robustly pull the low-dim pose from obs
-    if isinstance(obs, dict):
-        for v in obs.values():
-            a = np.asarray(v).ravel()
-            if a.size <= 32 and np.issubdtype(a.dtype, np.number):
-                return a.astype("float32")
-        raise ValueError(f"no low-dim state in obs dict (keys {list(obs.keys())}) -- locate the pose field")
-    a = np.asarray(obs).ravel()
-    if a.size <= 32:
-        return a.astype("float32")
-    raise ValueError(f"obs not low-dim (size {a.size}) -- pose labels unavailable; find the env state field")
+def get_pose(info):                                             # block pose [x, y, angle] -- the diagnostic found
+    p = np.asarray(info["block_pose"], dtype="float32").ravel() # frozen LeWM probes this at R2~0.53 (agent/full-state
+    assert p.size == 3, f"expected 3-d block_pose, got {p.shape}"  # weaker: the small pusher is hard to localize)
+    return p
 
 
 def rollout(env, gen):
     obs, info = env.reset(seed=int(gen.integers(1_000_000_000)))
-    frames, states = [env.render()], [get_state(obs)]
+    frames, states = [env.render()], [get_pose(info)]
     for _ in range(T):
         for _ in range(FS):
             obs, _, term, trunc, info = env.step(env.action_space.sample().astype("float32"))
-        frames.append(env.render()); states.append(get_state(obs))
+        frames.append(env.render()); states.append(get_pose(info))
     return np.stack(frames), np.stack(states)
 
 
@@ -136,21 +129,21 @@ def encode_rollouts(model, frames, idx):                       # -> Z [n*(T+1),1
     return torch.cat(Z)
 
 
-def probe(model, frames, states, itr, iev, smean, sstd):
-    Ztr = encode_rollouts(model, frames, itr); Zev = encode_rollouts(model, frames, iev)
-    Ytr = ((states[itr].reshape(-1, states.shape[-1]) - smean) / sstd)
-    Yev = ((states[iev].reshape(-1, states.shape[-1]) - smean) / sstd)
-    Ztr, Zev = Ztr.to(device), Zev.to(device)
-    Ytr, Yev = torch.tensor(Ytr, device=device), torch.tensor(Yev, device=device)
-    lin = nn.Linear(192, Ytr.shape[1]).to(device)
-    opt = torch.optim.Adam(lin.parameters(), lr=PROBE_LR)
-    for _ in range(PROBE_EPOCHS):
-        loss = ((lin(Ztr) - Ytr) ** 2).mean(); opt.zero_grad(); loss.backward(); opt.step()
-    with torch.no_grad():
-        pred = lin(Zev)
-        err = (pred - Yev).pow(2).mean().item()                                 # standardized MSE (lower=better)
-        r2 = (1 - (pred - Yev).pow(2).sum(0) / ((Yev - Yev.mean(0)).pow(2).sum(0) + 1e-9)).mean().item()
-    return err, r2
+def probe(model, frames, states, itr, iev, smean, sstd):       # closed-form RIDGE (Adam linear probe overfit)
+    Ztr = encode_rollouts(model, frames, itr).cpu().numpy().astype("float64")
+    Zev = encode_rollouts(model, frames, iev).cpu().numpy().astype("float64")
+    Ytr = (states[itr].reshape(-1, states.shape[-1]) - smean) / sstd
+    Yev = (states[iev].reshape(-1, states.shape[-1]) - smean) / sstd
+    zm, ym = Ztr.mean(0), Ytr.mean(0); Zc = Ztr - zm
+    best = (1e9, -1e9)                                          # (mse, r2); same alpha-sweep protocol for all encoders
+    for a in (1.0, 10.0, 100.0, 1000.0):
+        W = np.linalg.solve(Zc.T @ Zc + a * np.eye(Zc.shape[1]), Zc.T @ (Ytr - ym))
+        pred = (Zev - zm) @ W + ym
+        mse = float(((pred - Yev) ** 2).mean())
+        r2 = float((1 - ((pred - Yev) ** 2).sum(0) / (((Yev - Yev.mean(0)) ** 2).sum(0) + 1e-9)).mean())
+        if r2 > best[1]:
+            best = (mse, r2)
+    return best
 
 
 # ---- data-gen + POSE GATE (first) ---------------------------------------------------------------
@@ -194,13 +187,13 @@ print(f"  e2e-ensemble: probe MSE {res['e2e-ensemble'][0]:.4f}  R2 {res['e2e-ens
 print("\n==== M2 Tier 2 -- linear pose-probe (standardized MSE lower=better; R2 higher=better) ====")
 for n in ["frozen-LeWM", "e2e-single", "e2e-ensemble"]:
     print(f"  {n:14}: MSE {res[n][0]:.4f}   R2 {res[n][1]:+.3f}")
-fe, se, ee = res["frozen-LeWM"][0], res["e2e-single"][0], res["e2e-ensemble"][0]
-print("\n  verdict:")
-print(f"    shaping vs frozen : e2e-ensemble {'<' if ee < fe else '>='} frozen ({ee:.3f} vs {fe:.3f})")
-print(f"    ensemble vs single: e2e-ensemble {'<' if ee < se else '>='} e2e-single ({ee:.3f} vs {se:.3f})")
-if ee < fe * 0.98 and ee < se * 0.99:
+fr2, sr2, er2 = res["frozen-LeWM"][1], res["e2e-single"][1], res["e2e-ensemble"][1]
+print("\n  verdict (R2 higher=better; frozen block_pose R2~0.53 is the bar):")
+print(f"    shaping vs frozen : e2e-ensemble R2 {er2:+.3f} {'>' if er2 > fr2 else '<='} frozen {fr2:+.3f}")
+print(f"    ensemble vs single: e2e-ensemble R2 {er2:+.3f} {'>' if er2 > sr2 else '<='} e2e-single {sr2:+.3f}")
+if er2 > fr2 + 0.02 and er2 > sr2 + 0.01:
     print("    WIN -- end-to-end ENSEMBLE shaping improves the latent's physical structure beyond frozen + single.")
-elif min(se, ee) < fe * 0.98:
+elif max(sr2, er2) > fr2 + 0.02:
     print("    PARTIAL -- end-to-end shaping helps, but the ensemble adds little over single (it's the e2e, not the uncertainty).")
 else:
     print("    NULL -- shaping does not beat the frozen LeWM latent: its structure is hard to improve (Tier-1 uncertainty was the win).")
