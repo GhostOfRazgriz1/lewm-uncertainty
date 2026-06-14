@@ -34,7 +34,8 @@ FS, HS = 5, 3
 ACTION_SCALE = 2.0
 EPISODES, BUDGET = 25, 20
 S, CEM_ITERS, ELITE, HORIZON = 256, 5, 26, 8                      # same planner for both costs (only cost differs)
-N_CAL = 40                                                       # rollouts to fit the linear pose probe
+N_CAL, CAL_STEPS = 150, 12                                       # probe-fit: MANY rollouts (distinct poses) matters
+#   under random actions the block barely moves -> effective samples ~= #rollouts, not #frames; Tier 2 needed ~150
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model, cfg = load_lewm("/content/le-wm", device=device)
 prep = TT.Compose([TT.ToTensor(), TT.Resize((224, 224)), TT.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
@@ -81,7 +82,7 @@ gen = np.random.default_rng(0); frames, poses = [], []
 for r in range(N_CAL):
     env = gym.make("swm/PushT-v1", render_mode="rgb_array"); _, info = env.reset(seed=5000 + r)
     frames.append(env.render()); poses.append(np.asarray(info["block_pose"], dtype="float64").ravel())
-    for _ in range(BUDGET):
+    for _ in range(CAL_STEPS):
         for _ in range(FS):                                                            # one model-step of random actions
             _, _, _, _, info = env.step(env.action_space.sample().astype("float32"))
         frames.append(env.render()); poses.append(np.asarray(info["block_pose"], dtype="float64").ravel())
@@ -101,6 +102,9 @@ alpha = best[1]
 zm_all = Z.mean(0); Zc_all = Z - zm_all                                                # refit on ALL data
 W = np.linalg.solve(Zc_all.T @ Zc_all + alpha * np.eye(192), Zc_all.T @ Y)
 print(f"  probe held-out R2 mean {best[0]:.3f}  per-dim {np.round(best[2], 3).tolist()} (alpha {alpha})", flush=True)
+if best[0] < 0.3:
+    print("  !! PROBE TOO WEAK (R2<0.3) -- pose decodes are garbage; the planning comparison below is NOT a")
+    print("     valid test of the factor-space hypothesis. Increase N_CAL and re-run before interpreting.", flush=True)
 z_mean_t = torch.tensor(zm_all, dtype=torch.float32, device=device)
 W_t = torch.tensor(W, dtype=torch.float32, device=device)
 pmean_t = torch.tensor(pose_mean, dtype=torch.float32, device=device)
