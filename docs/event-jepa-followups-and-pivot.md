@@ -93,3 +93,30 @@ plans the pickup→drop subgoal sequence with the LEARNED inverse model, vs dens
   → descriptive events don't plan, oracle affordances do, ~7× gap (C3) → learned reachability/affordance
   closes the gap to oracle in 6/8 runs (C5). Measured gap + a method designed to close it that does.
 - **Next:** robustify the actionable-event controller (kill the 2/8 collapse), then scale beyond the toy.
+
+## (C6) Robustness — honest NEGATIVE on the quick fixes + diagnosed mechanism (`src/c6_robust.py`)
+Applied the standard fixes (action-relevant BC filtering, reachability-gating, M=4 inverse ensemble with
+per-member bootstrap, CEM-around-π with a learned affordance cost). 10 seeds, median + failure-rate:
+
+| planner | median | failure rate (≤0.5) |
+|---|---|---|
+| greedy-single (filtered) | 1.00 | **2/10 (20%)** |
+| greedy-ensemble | 1.00 | **2/10 (20%)** |
+| cem-around-π | 0.27 | robust but weak (never collapses, never wins) |
+
+**The fixes did NOT solve it.** Filtering + ensembling only *reshuffle* which seeds collapse (the ensemble
+fixed seed 0, broke seed 5) — the ~20% catastrophic-failure rate persists; CEM-around-π trades the collapse
+for uniform mediocrity. **Three candidate mechanisms tested and REFUTED** (on collapse vs success seeds):
+- condition-ignoring? NO — `‖π(·,pickup)−π(·,drop)‖` ≈ 0.07–0.11 (≳ STEP) on all seeds.
+- wrong pickup navigation? NO — cos(π(·,pickup), toward-object) = 0.84–0.99 incl. collapse seeds.
+- wrong drop navigation? NO — cos(π(·,drop), toward-dropzone) = 0.87–0.98 incl. collapse seeds.
+
+**The policy is correct on every on-distribution probe yet fails in closed loop → the mechanism is BC
+distribution-shift / compounding error** (greedy rollout drifts off the training distribution; bad on
+unlucky seeds). This explains why on-distribution probes look perfect and why data-filtering / ensembling
+(which don't touch closed-loop drift) don't help. **Principled fix = closed-loop training (DAgger / on-policy
+correction) or a robust model-based controller** — a real research step, not a quick patch.
+
+**Verdict:** the actionable-event THESIS is solid (C3+C5); the method's robustness is a well-characterized
+open problem (BC distribution-shift) with a clear principled fix. Honest, paper-ready limitations + the
+exact next experiment.

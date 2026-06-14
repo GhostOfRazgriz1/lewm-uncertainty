@@ -81,6 +81,23 @@ for ep in range(args.epochs):
         l_dyn = ((dense(torch.cat([Zall[bd], Aall[bd]], -1)) - dZ[bd]) ** 2).mean()
         opt.zero_grad(); (l_inv + l_aff + l_dyn).backward(); opt.step()
 print(f"filtered inverse pairs {nI} (of {nA} states); trained ensemble(M={args.M})+aff+dense", flush=True)
+with torch.no_grad():                                              # does the inverse model USE the event condition?
+    zb = Zall[:512]; e1 = to(oh(1)).repeat(len(zb), 1); e2 = to(oh(2)).repeat(len(zb), 1)
+    ap_ = torch.stack([pi(torch.cat([zb, e1], -1)) for pi in ens]).mean(0)
+    ad_ = torch.stack([pi(torch.cat([zb, e2], -1)) for pi in ens]).mean(0)
+    print(f"SEED {args.seed} cond-sensitivity ||pi(.,pickup)-pi(.,drop)|| {float((ap_ - ad_).norm(dim=1).mean()):.4f} (STEP={STEP})", flush=True)
+    # does pi(.,pickup) actually point toward the object? (cos alignment); restrict to not-carrying states
+    nc = zb[:, 4] < 0.5
+    d_obj = zb[nc, 2:4] - zb[nc, :2]; d_obj = d_obj / (d_obj.norm(dim=1, keepdim=True) + 1e-9)
+    pn = ap_[nc] / (ap_[nc].norm(dim=1, keepdim=True) + 1e-9)
+    print(f"SEED {args.seed} pickup-direction-alignment(cos with toward-object) {float((pn * d_obj).sum(1).mean()):.3f}", flush=True)
+    # drop phase: for CARRYING states, does pi(.,drop) point toward the drop zone? (drop data is rarer)
+    car = Zall[Zall[:, 4] > 0.5][:512]
+    if len(car) > 8:
+        ad2 = torch.stack([pi(torch.cat([car, to(oh(2)).repeat(len(car), 1)], -1)) for pi in ens]).mean(0)
+        d_dz = to(env.drop_c) - car[:, :2]; d_dz = d_dz / (d_dz.norm(dim=1, keepdim=True) + 1e-9)
+        pn2 = ad2 / (ad2.norm(dim=1, keepdim=True) + 1e-9)
+        print(f"SEED {args.seed} drop-direction-alignment(cos with toward-dropzone) {float((pn2 * d_dz).sum(1).mean()):.3f}  (n_carry={len(car)})", flush=True)
 
 
 @torch.no_grad()
