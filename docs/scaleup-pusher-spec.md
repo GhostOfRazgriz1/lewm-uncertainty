@@ -109,8 +109,28 @@ based fails totally, actionable works substantially). The *method* partially tra
 (goal-relational events). Next: close the residual gap (better push controller — model-corrected / more
 DAgger / longer-horizon), then consider pixels / real Push-T.
 
+### E3b — model-corrected controller (CEM-around-π): REFUTED, and it localizes the bottleneck
+| | oracle | pure-π (DAgger) | cem-around-π |
+|---|---|---|---|
+| success (3 seeds) | 0.85–0.95 | 0.60 | **0.05–0.20** |
+
+Seeding CEM at π's push rollout and refining with the dense model made it **much worse** than just running
+π. The hypothesis "dense can *evaluate* a push even if it can't *search* one" was **wrong**: the dense model
+is too inaccurate on **contact dynamics** to rank perturbations — it favors actions it *thinks* push toward
+the goal but actually don't, so the search is actively misled (this is also why dense-CEM = 0.00).
+
+**This localizes the residual gap to the DYNAMICS MODEL, not the controller/planner.** The model-free DAgger
+controller (0.60) is the best learned approach *precisely because it sidesteps the unreliable model*; adding
+the model back reintroduces its contact-prediction errors and hurts. Reinforces the program throughline:
+**on contact dynamics the learned world model is too inaccurate to plan or refine with; model-free skill
+learning sidesteps this but caps below the oracle.** So the residual gap is a *model-accuracy* problem.
+
+To close 0.60 → ~0.90, the lever is **model-free** (more DAgger iterations / a better π architecture /
+ensemble / more expert coverage), **not** model-based refinement. Or accept the honest cap + finding.
+
 ## Done / Next
 - [x] `PushEnv` + E1 (discovery) — fuzzy, goal-relational events.
-- [x] E3 (the decisive reachability test) — gap reproduces; learned reachability+DAgger closes ~67%.
-- [ ] close the residual gap (model-corrected controller / more DAgger) → does learned reach oracle?
-- [ ] then: pixels / orientation (real Push-T) — the harder rungs.
+- [x] E3 (decisive reachability) — gap reproduces; model-free DAgger closes ~67% (0.60 vs oracle 0.90).
+- [x] E3b (CEM-around-π) — model-correction HURTS; residual gap is bottlenecked on dynamics-model contact accuracy.
+- [ ] close the gap MODEL-FREE (more DAgger / better π) → does it reach oracle?  OR accept the cap + write up.
+- [ ] harder rungs (pixels / orientation = real Push-T) only after the gap question is settled.
