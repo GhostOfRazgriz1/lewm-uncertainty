@@ -77,6 +77,40 @@ From state, deterministic, disk block (no orientation), fixed goal, CPU, ≥3 se
 (numpy env + the existing `_event_common` model/training code). Oracle + scripted expert included for the gap
 and DAgger. ~the same compute envelope as C3/C5/C7.
 
-## Next
-- [ ] implement `PushEnv` + E1 (discovery) — cheapest rung, tells us if discovery survives emergent events.
-- [ ] on E1 pass → E2 (does the gap reproduce), then E3 (the decisive reachability test), then E4 (DAgger).
+## RESULTS
+
+### E1 — discovery (3 seeds): WEAK / fuzzy
+recall 0.44–0.58, **distinct-codes = False** all seeds. CONTACT and MOVED never separate (they're the same
+phenomenon — pushing; the 3-event taxonomy was over-specified). DELIVERED gets its own code in 2/3 seeds
+(lift 2.8–3.8×) — it's the one event distinguishable by *terminal location*. **Lesson:** pushing's
+task-event is **goal-relational**, not transition-type-distinct, so a transition-compression bottleneck only
+weakly captures it. The clean symbolic-event discovery of the toy does **not** transfer; the task event is
+defined by context, which foreshadows the reachability point. (So E3 gives the ground-truth event and tests
+reachability directly.)
+
+### E3 — reachability (3 seeds): the GAP reproduces sharply; learned reachability PARTIALLY closes it
+| | dense-CEM | oracle (scripted push) | learned-BC | learned-DAgger |
+|---|---|---|---|---|
+| success | **0.00** | 0.85–0.95 | 0.05–0.20 | **0.60 (all 3 seeds)** |
+
+- **Gap reproduces, harder than the toy:** model-based dense-CEM is **0.00** (it cannot plan the contact-push
+  from a sparse goal cost — the LeWM "predictive ≠ plannable" failure, reproduced on contact dynamics),
+  oracle ~0.90.
+- **Learned reachability PARTIALLY transfers:** the learned inverse model + DAgger reaches **0.60** —
+  ~67% of the dense→oracle gap, and a *huge* lift over both dense-CEM (0.00) and BC (~0.1). It learns a
+  genuine push skill, not navigation. So the C5/C7 mechanism is **not** merely a navigation artifact.
+- **But a residual gap to the oracle remains** (0.60 vs 0.90) — the toy *fully* closed the gap; hard
+  (contact) reachability leaves the learned controller good-but-imperfect. DAgger is essential (BC alone
+  fails), consistent with the C6/C7 distribution-shift finding.
+
+**Scale-up verdict.** The actionable-events *thesis* strengthens on the harder substrate (descriptive/model-
+based fails totally, actionable works substantially). The *method* partially transfers to contact-pushing
+(real, not an artifact) with an honest residual gap to the oracle. Discovery is the weaker pillar on pushing
+(goal-relational events). Next: close the residual gap (better push controller — model-corrected / more
+DAgger / longer-horizon), then consider pixels / real Push-T.
+
+## Done / Next
+- [x] `PushEnv` + E1 (discovery) — fuzzy, goal-relational events.
+- [x] E3 (the decisive reachability test) — gap reproduces; learned reachability+DAgger closes ~67%.
+- [ ] close the residual gap (model-corrected controller / more DAgger) → does learned reach oracle?
+- [ ] then: pixels / orientation (real Push-T) — the harder rungs.
