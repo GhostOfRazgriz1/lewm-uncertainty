@@ -284,6 +284,25 @@ Intended to combine a good learned seed with model-based local refinement; **fai
 | **P4 (E3b)** | Does **CEM-around-π** close the residual 0.60 → 0.90? | **No — it hurts** (0.05–0.20). The dense model is **too inaccurate on contact** to rank perturbations (same reason dense-CEM = 0). **Localizes the residual gap to the dynamics model**, not the controller. |
 | **P5 (E3c)** | Is the 0.60 cap soft (coverage) or fundamental? | **Soft.** Model-free **DAgger scaling** lifts success 0.60 → ~0.80 (peak 0.88) by 6–8 iters; capacity barely matters (48 ≈ 96) ⇒ **coverage** is the lever. |
 
+### 6.3 Real physics (`PushPhysEnv`, pymunk): the result transfers
+
+A genuine 2D physics engine (Chipmunk2D via pymunk) — real contact, friction, box rotation — replaces the
+hand-coded shove. State-based (6-D), expert = a competent scripted feedback pusher (0.94 in the behind-start
+regime). Reachability test, 3 seeds:
+
+| | dense-CEM | scripted (oracle) | learned-BC | learned-DAgger |
+|---|---|---|---|---|
+| success | **0.00** | 0.90–0.95 | 0.85–0.95 | 0.85–0.95 |
+
+**Model-based planning over the learned model fails completely (0.00, all seeds); the model-free learned
+controller matches the expert (~0.9).** The core result transfers to real contact dynamics — it is **not** a
+toy-dynamics artifact.
+
+Two honest scopes: (a) **go-around navigation is the expert-acquisition wall** — naive true-sim MPC scored 0%
+and the scripted pusher *with* go-around only 25%; the clean result is the **behind-start** regime. (b) Here
+**BC already matches the oracle**, so DAgger is not load-bearing in this regime (the controller stays
+on-distribution) — a regime difference from the toy, not a contradiction.
+
 ---
 
 ## 7. Findings
@@ -295,7 +314,8 @@ Intended to combine a good learned seed with model-based local refinement; **fai
 
 C3 measures the gap (descriptive ≈ dense ≪ oracle); C5/C7 close it on the toy (DAgger → near-perfect); P3/P5
 show it **transfers to genuine contact reachability, model-free** (0.00 model-based → ~0.80–0.88 learned vs
-0.90 oracle). The toy win is **not** a navigation artifact.
+0.90 oracle); and §6.3 shows it on a **real physics engine** (pymunk: model-based 0.00, model-free ~0.9). The
+toy win is **not** a navigation artifact, and **not** a hand-coded-dynamics artifact.
 
 ### 7.2 Model-free beats model-based on contact — and we know why
 
@@ -355,5 +375,8 @@ The discipline (median + failure-rate + seeds + falsifiable mechanism probes) is
 | `p3_push_reachability.py` | P3 dense / oracle / BC / DAgger reachability |
 | `p4_push_correct.py` | P4 CEM-around-π (model correction) |
 | `p5_push_modelfree.py` | P5 model-free DAgger cap curve |
+| `_pushphys_common.py` | **real-physics** pymunk pusher, scripted expert, true-sim MPC oracle |
+| `pp0_oracle_test.py` | real-physics expert/oracle competence gate |
+| `pp3_push_reachability.py` | real-physics reachability: dense-CEM / scripted / BC / DAgger |
 
 Specs: `docs/event-jepa-followups-and-pivot.md` (toy arc + pivot), `docs/scaleup-pusher-spec.md` (pusher arc).
