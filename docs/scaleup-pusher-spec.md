@@ -128,9 +128,28 @@ learning sidesteps this but caps below the oracle.** So the residual gap is a *m
 To close 0.60 → ~0.90, the lever is **model-free** (more DAgger iterations / a better π architecture /
 ensemble / more expert coverage), **not** model-based refinement. Or accept the honest cap + finding.
 
+### E3c — is the 0.60 cap soft or fundamental? SOFT (model-free DAgger scaling lifts it)
+Success vs DAgger iterations (2 seeds × hid {48,96}): from ~0.60 at 3 iters to **~0.80 typical, peak 0.88**
+at 6–8 iters — approaching oracle ~0.90. Noisy/oscillating (DAgger isn't monotone — the reactive π can
+regress as the aggregated set shifts), and capacity barely matters (48 ≈ 96), so **coverage is the lever**.
+The residual gap was **soft**: model-free closed-loop coverage substantially closes it; the controller is not
+at a fundamental ceiling.
+
+## Scale-up: FINAL verdict
+The actionable-event method **transfers to hard contact reachability**, **model-free**:
+- descriptive/model-based planning fails totally (dense-CEM 0.00);
+- learned model-free reachability + DAgger reaches **~0.80 (peak 0.88) vs oracle 0.90** with enough coverage;
+- **model-based refinement HURTS** (the dynamics model is too inaccurate on contact — P4) — model-free is the way;
+- discovery is the weak pillar (pushing events are goal-relational).
+
+So the thesis strengthens AND the method substantially closes the gap to a hand-coded pusher on a genuine
+contact problem — the toy's win was *not* a navigation artifact. Honest limits: model-based planning/refinement
+is useless on contact (the WM isn't accurate enough), discovery degrades on goal-relational events, and the
+expert is scripted (expert-acquisition is the real next open problem for un-scriptable domains).
+
 ## Done / Next
-- [x] `PushEnv` + E1 (discovery) — fuzzy, goal-relational events.
-- [x] E3 (decisive reachability) — gap reproduces; model-free DAgger closes ~67% (0.60 vs oracle 0.90).
-- [x] E3b (CEM-around-π) — model-correction HURTS; residual gap is bottlenecked on dynamics-model contact accuracy.
-- [ ] close the gap MODEL-FREE (more DAgger / better π) → does it reach oracle?  OR accept the cap + write up.
-- [ ] harder rungs (pixels / orientation = real Push-T) only after the gap question is settled.
+- [x] E1 discovery (fuzzy, goal-relational), E3 reachability (gap reproduces; model-free closes it),
+      E3b model-correction (hurts → bottleneck = dynamics model), E3c cap (soft → model-free reaches ~0.80–0.88).
+- [ ] **CONSOLIDATE / write up** — toy (full) + pusher (transfers, model-free, near-oracle) is a complete,
+      honestly-scoped arc. Harder rungs (pixels / orientation, un-scriptable expert) are future work, not
+      needed to establish the contribution.
