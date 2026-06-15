@@ -121,5 +121,7 @@ policy), which is where the hard control problem now lives.
 2. Event codes align with hidden events (discovery), and degrade on goal-relational events.
 3. The gap: dense / descriptive-event fail, oracle succeeds (EventEnv).
 4. Closing the gap + robustness: BC brittle → DAgger (EventEnv 20-seed min/mean).
-5. The ladder: dense-CEM vs model-free vs oracle across EventEnv / PushEnv / PushPhysEnv.
+5. **The ladder** (`docs/fig_ladder.png`, from `src/fig_ladder.py`): dense-CEM vs model-free vs oracle across
+   EventEnv / PushEnv / PushPhysEnv — model-based collapses 0.13→0.00→0.00 as contact realism rises, model-free
+   tracks the oracle. *This is the headline figure.*
 6. Why model-based fails: model-inaccuracy (behind-start dense-CEM = 0) vs search (true-sim MPC = 0).
