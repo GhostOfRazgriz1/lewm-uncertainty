@@ -26,7 +26,8 @@ import cv2
 ENV_ID = "Reacher-v5"
 IMG, D, M = 84, 128, 5
 N_DATA_EP, ENC_EPOCHS, ENS_EPOCHS, BS, KSTEP = 120, 40, 60, 64, 12
-H_SWEEP, S_CEM, CEM_ITERS, ELITE, EVAL_EP = [8, 12, 16], 256, 3, 26, 12
+S_CEM, CEM_ITERS, ELITE, EVAL_EP = 256, 3, 26, 10
+ENS_SEEDS, H_EVAL = [0, 1, 2], 12                                # seed the A/B; control at one horizon (bounded compute)
 LAM, VFLOOR = 0.5, 1e-3
 device = "cuda" if torch.cuda.is_available() else "cpu"
 torch.manual_seed(0); np.random.seed(0)
@@ -135,7 +136,8 @@ def encode_eps():
 
 
 Zs, As = encode_eps()
-print(f"  encoded {len(Zs)} latent sequences (D={D})", flush=True)
+NTR = len(Zs) - 20                                               # hold out 20 latent seqs for the fidelity check
+print(f"  encoded {len(Zs)} latent sequences (D={D}); {NTR} train / 20 held-out", flush=True)
 
 
 # ---- 3) train baseline vs calibrated predictor ENSEMBLES on frozen latents ------------------------
@@ -155,7 +157,7 @@ def train_ensemble(calibrated, seed):
     opt = torch.optim.Adam(members.parameters(), lr=1e-3)
     for m in members:
         m.train()
-    idx = [(e, t) for e in range(len(Zs)) for t in range(len(As[e]) - KSTEP)]
+    idx = [(e, t) for e in range(NTR) for t in range(len(As[e]) - KSTEP)]
     for epoch in range(ENS_EPOCHS):
         np.random.shuffle(idx)
         for i in range(0, len(idx), BS):
@@ -176,11 +178,7 @@ def train_ensemble(calibrated, seed):
     return members
 
 
-print("training ensembles (baseline / calibrated) ...", flush=True)
-WMS = {"baseline": train_ensemble(False, 0), "calibrated": train_ensemble(True, 0)}
-
-
-# ---- 4) CEM control with each WM, swept over planning horizon ------------------------------------
+# ---- 4) CEM control + held-out fidelity, seeded A/B ---------------------------------------------
 @torch.no_grad()
 def cem_action(members, z0, H, gen):
     mu = torch.zeros(H, adim, device=device); sig = torch.ones(H, adim, device=device)
@@ -208,27 +206,36 @@ def eval_control(members, H):
     return np.array(rets)
 
 
-print("\n==== (3b) Reacher control: baseline-WM vs calibrated-WM, vs planning horizon ====", flush=True)
-res = {}
-for H in H_SWEEP:
-    for name in ("baseline", "calibrated"):
-        res[(name, H)] = eval_control(WMS[name], H)
-    b, c = res[("baseline", H)], res[("calibrated", H)]
-    d = c.mean() - b.mean(); s = np.hypot(sem(c), sem(b))                     # >0: calibrated better (higher return)
-    print(f"  H={H:2d}: baseline {b.mean():.2f}+/-{sem(b):.2f} | calibrated {c.mean():.2f}+/-{sem(c):.2f}"
-          f" | margin {d:+.2f}+/-{s:.2f} ({d/(s+1e-9):+.1f} SEM)", flush=True)
+@torch.no_grad()
+def fidelity(members, K=16):                                     # k-step rollout err on HELD-OUT latents (sanity + (1) link)
+    st = [(e, t) for e in range(NTR, len(Zs)) for t in range(len(As[e]) - K)]
+    z0 = torch.stack([Zs[e][t] for e, t in st]); acts = torch.stack([As[e][t:t + K] for e, t in st])
+    tgt = torch.stack([Zs[e][t + 1:t + K + 1] for e, t in st])
+    mu = ensemble_rollout(members, z0, acts).mean(0)
+    return (mu - tgt).norm(dim=-1).mean(0).cpu().numpy()         # [K]
 
-# ---- verdict -------------------------------------------------------------------------------------
-margins = [res[("calibrated", H)].mean() - res[("baseline", H)].mean() for H in H_SWEEP]
-sems = [np.hypot(sem(res[("calibrated", H)]), sem(res[("baseline", H)])) for H in H_SWEEP]
-grows = margins[-1] > margins[0]
-best_sig = max(m / (s + 1e-9) for m, s in zip(margins, sems))
-print("\n  verdict:")
-print(f"    margins by H {H_SWEEP}: {[round(m,2) for m in margins]}  (grows with horizon: {grows})")
-if best_sig > 2 and grows:
-    print("    => POSITIVE: calibration objective improves CONTROL, and the margin GROWS with planning horizon")
-    print("       -- the (1)->(3) signature (long-horizon fidelity gain shows up as control). The ICLR result.")
-elif best_sig > 2:
-    print("    => POSITIVE (flat): calibration improves control at some horizon but the H-trend isn't clean.")
+
+print(f"\n==== (3b) seeded A/B: control @H={H_EVAL} + held-out fidelity (seeds {ENS_SEEDS}) ====", flush=True)
+mar, rb_all, rc_all, fb_all, fc_all = [], [], [], [], []
+for sd in ENS_SEEDS:
+    wm_b, wm_c = train_ensemble(False, sd), train_ensemble(True, sd)         # same seed -> same init, fair pair
+    fb_all.append(fidelity(wm_b)); fc_all.append(fidelity(wm_c))
+    rb, rc = eval_control(wm_b, H_EVAL), eval_control(wm_c, H_EVAL)
+    rb_all.append(rb.mean()); rc_all.append(rc.mean()); mar.append(rc.mean() - rb.mean())
+    print(f"  seed {sd}: baseline {rb.mean():.2f} | calibrated {rc.mean():.2f} | margin {rc.mean()-rb.mean():+.2f}", flush=True)
+mar, rb_all, rc_all = np.array(mar), np.array(rb_all), np.array(rc_all)
+fb, fc = np.mean(fb_all, 0), np.mean(fc_all, 0)
+
+print(f"\n  control @H={H_EVAL}: baseline {rb_all.mean():.2f}+/-{sem(rb_all):.2f} | "
+      f"calibrated {rc_all.mean():.2f}+/-{sem(rc_all):.2f}")
+print(f"  MARGIN (calib - base): {mar.mean():+.2f} +/- {sem(mar):.2f}  ({mar.mean()/(sem(mar)+1e-9):+.1f} SEM over seeds)")
+print(f"  held-out fidelity@k=16: baseline {fb[-1]:.3f} | calibrated {fc[-1]:.3f}  "
+      f"({100*(fb[-1]-fc[-1])/fb[-1]:+.1f}% calib)  [baseline sane if << a no-op]")
+print(f"    base  fid curve {np.round(fb,2).tolist()}")
+print(f"    calib fid curve {np.round(fc,2).tolist()}")
+if mar.mean() > 2 * sem(mar) and mar.min() > 0:
+    print("  => POSITIVE (seeded): the calibration objective improves Reacher control across ALL seeds. The headline.")
+elif mar.mean() > sem(mar):
+    print("  => WEAK-POSITIVE: directional over seeds but within ~2 SEM; add seeds before claiming.")
 else:
-    print("    => NULL: calibrated WM does not beat baseline for control here (fidelity gain didn't translate).")
+    print("  => NULL (seeded): the single-seed margin did not survive seeding.")
