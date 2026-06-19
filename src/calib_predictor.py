@@ -34,9 +34,9 @@ M, K_MAX = 6, 12                                                  # ensemble siz
 EPOCHS, BS, LR = 50, 256, 1e-3
 LAM, BETA, VFLOOR = 0.5, 1.0, 1e-3                                # calib weight; confidence sharpness; var floor
 NOISE_SIGMA = 0.4
-SEEDS = [0, 1, 2]                                                 # multi-seed (single-seed flipped on us in Tier 2)
-VARIANTS = [("baseline", False, False), ("conf-only", True, False),   # ablation: which component drives the gain?
-            ("nll-only", False, True), ("ours", True, True)]
+SEEDS = [0, 1, 2]                                                 # multi-seed (single-seed inflated ~3x in Tier 2 + here)
+BETA_NLL = 0.5                                                    # beta-NLL (Seitzer'22): calibrate var WITHOUT hurting the mean
+VARIANTS = [("baseline", "base"), ("nll", "nll"), ("beta-nll", "bnll")]   # conf-weighting ablated to null -> dropped
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model, cfg = load_lewm("/content/le-wm", device=device)
 prep = TT.Compose([TT.ToTensor(), TT.Resize((224, 224)), TT.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
@@ -90,7 +90,7 @@ def ensemble_rollout(members, z0, acts):                          # z0 [B,192], 
     return torch.stack(outs)
 
 
-def train(use_conf, use_nll, seed):
+def train(mode, seed):                                            # mode: "base" | "nll" | "bnll"
     torch.manual_seed(seed); np.random.seed(seed)
     members = nn.ModuleList([Pred() for _ in range(M)]).to(device)
     opt = torch.optim.Adam(members.parameters(), lr=LR)
@@ -105,13 +105,14 @@ def train(use_conf, use_nll, seed):
             acts = torch.stack([Atr[r, t:t + K_MAX] for r, t in b])             # [B,k,10]
             tgt = torch.stack([Ztr[r, t + 1:t + K_MAX + 1] for r, t in b])      # [B,k,192]
             preds = ensemble_rollout(members, z0, acts)                         # [M,B,k,192]
-            memb_mse = ((preds - tgt[None]) ** 2).mean(-1)                      # [M,B,k]
-            mu = preds.mean(0); s = preds.var(0).mean(-1)                       # [B,k,192],[B,k]
-            w = 1.0 / (1.0 + BETA * s.detach()) if use_conf else torch.ones_like(s)
-            loss = (w[None] * memb_mse).mean()
-            if use_nll:                                                         # calibration: var -> realized err
+            loss = ((preds - tgt[None]) ** 2).mean()                            # member-fitting MSE (mean accuracy)
+            if mode in ("nll", "bnll"):                                         # + variance->realized-error calibration
+                mu = preds.mean(0); s = preds.var(0).mean(-1)                   # [B,k,192],[B,k]
                 se = ((mu - tgt) ** 2).mean(-1); sf = s.clamp(min=VFLOOR)
-                loss = loss + LAM * (0.5 * (se / sf + torch.log(sf))).mean()
+                nll = 0.5 * (se / sf + torch.log(sf))                           # [B,k]
+                if mode == "bnll":
+                    nll = (sf.detach() ** BETA_NLL) * nll                       # beta-NLL: keep the mean, calibrate var
+                loss = loss + LAM * nll.mean()
             opt.zero_grad(); loss.backward()
             nn.utils.clip_grad_norm_(members.parameters(), 5.0); opt.step()
     for m in members:
@@ -130,8 +131,9 @@ def eval_fidelity_calib(members):
     err = (mu - tgt).norm(dim=-1)                                              # [B,k] rollout error per step
     fid = err.mean(0).cpu().numpy()                                            # [k]
     se = ((mu - tgt) ** 2).mean(-1).cpu().numpy(); sv = s.cpu().numpy()        # [B,k] each
-    cal = np.array([spearman(sv[:, k], se[:, k]) for k in range(K_MAX)])       # within-horizon Spearman per k
-    return fid, cal
+    cal = np.array([spearman(sv[:, k], se[:, k]) for k in range(K_MAX)])       # RANK calibration (Spearman) per k
+    ratio = float(se.mean() / (sv.mean() + 1e-9))                              # SCALE calibration: se/var, 1.0 = calibrated
+    return fid, cal, ratio
 
 
 def spearman(x, y):
@@ -180,33 +182,39 @@ print(f"  Z {tuple(Z.shape)}  train {NTR} / eval {N_ROLLOUTS-NTR} rollouts (shel
 
 # ---- sweep variants x seeds ----------------------------------------------------------------------
 NS = len(SEEDS)
-res = {}                                                          # name -> (fid[S,k], cal[S,k], ood_comb[S])
-for name, uc, un in VARIANTS:
-    fids, cals, oodc = [], [], []
+res = {}                                                          # name -> (fid[S,k], cal[S,k], ratio[S], ood[S])
+for name, mode in VARIANTS:
+    fids, cals, ratios, oodc = [], [], [], []
     for s in SEEDS:
-        members = train(uc, un, s)
-        f, c = eval_fidelity_calib(members); o = eval_ood(members)
-        fids.append(f); cals.append(c); oodc.append(o[2])
-    res[name] = (np.array(fids), np.array(cals), np.array(oodc))
+        members = train(mode, s)
+        f, c, rt = eval_fidelity_calib(members); o = eval_ood(members)
+        fids.append(f); cals.append(c); ratios.append(rt); oodc.append(o[2])
+    res[name] = (np.array(fids), np.array(cals), np.array(ratios), np.array(oodc))
     fm, fsem = res[name][0].mean(0), res[name][0].std(0) / np.sqrt(NS)
     print(f"[{name}]  fidelity@k mean {np.round(fm,3).tolist()}", flush=True)
-    print(f"           fidelity@k={K_MAX} {fm[-1]:.3f}+/-{fsem[-1]:.3f} | calib(mean) {res[name][1].mean():+.3f}"
-          f" | OOD-combined {res[name][2].mean():.3f}\n", flush=True)
+    print(f"           fid@k={K_MAX} {fm[-1]:.3f}+/-{fsem[-1]:.3f} | rank-calib {res[name][1].mean():+.3f}"
+          f" | scale-calib(se/var->1) {res[name][2].mean():.2f} | OOD {res[name][3].mean():.3f}\n", flush=True)
 
 # ---- verdict (seeded) ----------------------------------------------------------------------------
-print(f"==== verdict ({NS} seeds; fidelity@k={K_MAX} lower=better) ====")
-bk = res["baseline"][0][:, -1]                                    # [S] baseline long-horizon error
-for name in ["conf-only", "nll-only", "ours"]:
-    vk = res[name][0][:, -1]
-    d = bk.mean() - vk.mean(); sm = np.hypot(bk.std() / np.sqrt(NS), vk.std() / np.sqrt(NS))
-    print(f"  {name:9} vs baseline: {d:+.3f} +/- {sm:.3f}  ({100*d/bk.mean():+.1f}%, {d/(sm+1e-9):+.1f} SEM)")
-oc, bc = res["ours"][1].mean(), res["baseline"][1].mean()
-print(f"  calibration: ours {oc:+.3f} vs baseline {bc:+.3f} (objective should PRESERVE; ensemble already strong)")
-print(f"  OOD: shell alone ~1.0 (SIGReg geometry, predictor-independent); ours combined {res['ours'][2].mean():.3f}")
-ok = res["ours"][0][:, -1]; od = bk.mean() - ok.mean(); osm = np.hypot(bk.std() / np.sqrt(NS), ok.std() / np.sqrt(NS))
-if od > 2 * osm:
-    print("  => POSITIVE (seeded): the objective improves long-horizon fidelity beyond 2 SEM. Ablation rows show the driver.")
-elif od > osm:
-    print("  => WEAK-POSITIVE: 1-2 SEM directional gain; more seeds / longer horizon to confirm before (3).")
-else:
-    print("  => NULL (seeded): single-seed gain washed out -> the plain ensemble suffices.")
+print(f"==== verdict ({NS} seeds) ====")
+b1, bK = res["baseline"][0][:, 0], res["baseline"][0][:, -1]      # baseline short- / long-horizon error
+for name in ["nll", "beta-nll"]:
+    v1, vK = res[name][0][:, 0], res[name][0][:, -1]
+    dK = bK.mean() - vK.mean(); sK = np.hypot(bK.std() / np.sqrt(NS), vK.std() / np.sqrt(NS))
+    d1 = b1.mean() - v1.mean(); s1 = np.hypot(b1.std() / np.sqrt(NS), v1.std() / np.sqrt(NS))
+    print(f"  {name:8}: fid@k={K_MAX} {dK:+.3f}+/-{sK:.3f} ({dK/(sK+1e-9):+.1f} SEM) | "
+          f"fid@k=1 {d1:+.3f}+/-{s1:.3f} ({'short-horizon COST' if d1 < -s1 else 'no short cost'})")
+print(f"  scale-calib (se/var, 1.0=calibrated):  baseline {res['baseline'][2].mean():.2f} | "
+      f"nll {res['nll'][2].mean():.2f} | beta-nll {res['beta-nll'][2].mean():.2f}  (closer to 1 = better)")
+print(f"  rank-calib (Spearman, ~saturated):     baseline {res['baseline'][1].mean():+.3f} | "
+      f"beta-nll {res['beta-nll'][1].mean():+.3f}")
+print(f"  OOD: shell ~1.0 (geometry, predictor-free); combined baseline {res['baseline'][3].mean():.3f} | "
+      f"beta-nll {res['beta-nll'][3].mean():.3f}")
+bn1, bnK = res["beta-nll"][0][:, 0], res["beta-nll"][0][:, -1]
+fid_ok = (bK.mean() - bnK.mean()) > 2 * np.hypot(bK.std() / np.sqrt(NS), bnK.std() / np.sqrt(NS))
+no_cost = (b1.mean() - bn1.mean()) > -np.hypot(b1.std() / np.sqrt(NS), bn1.std() / np.sqrt(NS))
+scale_ok = abs(res["beta-nll"][2].mean() - 1) < abs(res["baseline"][2].mean() - 1)
+print("\n  => beta-NLL: " + ("CLEAN WIN -- long-horizon fidelity up (>2 SEM) without a short-horizon cost"
+                             if fid_ok and no_cost else "fidelity up but check short-horizon cost / SEM")
+      + (" AND scale-calibration improved (recovers the calibration axis)." if scale_ok else
+         " ; scale-calibration NOT improved."))
