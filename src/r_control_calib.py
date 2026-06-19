@@ -23,10 +23,12 @@ import torch.nn as nn
 import gymnasium as gym
 import cv2
 
-ENV_ID = "Reacher-v5"
+ENV_ID = "Pusher-v5"                                            # (A): harder, contact dynamics -> real model error to fix
+#   Reacher was TOO EASY (latents ~perfectly predictable, +3.6% fidelity, control NULL). Pusher = long-horizon
+#   goal-reaching with contact -> the WM should have substantial long-horizon error -> room for the objective.
 IMG, D, M = 84, 128, 5
-N_DATA_EP, ENC_EPOCHS, ENS_EPOCHS, BS, KSTEP = 120, 40, 60, 64, 12
-S_CEM, CEM_ITERS, ELITE, EVAL_EP = 256, 3, 26, 10
+N_DATA_EP, ENC_EPOCHS, ENS_EPOCHS, BS, KSTEP = 80, 35, 60, 64, 12
+S_CEM, CEM_ITERS, ELITE, EVAL_EP = 256, 3, 26, 8
 ENS_SEEDS, H_EVAL = [0, 1, 2], 12                                # seed the A/B; control at one horizon (bounded compute)
 LAM, VFLOOR = 0.5, 1e-3
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -215,7 +217,21 @@ def fidelity(members, K=16):                                     # k-step rollou
     return (mu - tgt).norm(dim=-1).mean(0).cpu().numpy()         # [K]
 
 
-print(f"\n==== (3b) seeded A/B: control @H={H_EVAL} + held-out fidelity (seeds {ENS_SEEDS}) ====", flush=True)
+@torch.no_grad()
+def eval_random():                                               # competence reference: is the WM even worth planning with?
+    arng = np.random.default_rng(2); rets = []
+    for ep in range(EVAL_EP):
+        env = gym.make(ENV_ID, render_mode="rgb_array"); env.reset(seed=20_000 + ep)
+        R = 0.0; done = False
+        while not done:
+            _, r, term, trunc, _ = env.step(arng.uniform(-1, 1, adim).astype("float32")); R += float(r); done = term or trunc
+        rets.append(R); env.close()
+    return np.array(rets)
+
+
+print(f"\n==== (3b) {ENV_ID}: control @H={H_EVAL} + held-out fidelity (seeds {ENS_SEEDS}) ====", flush=True)
+rand = eval_random()
+print(f"  random-action reference: {rand.mean():.2f} +/- {sem(rand):.2f}  (baseline-WM must beat this = competent)\n", flush=True)
 mar, rb_all, rc_all, fb_all, fc_all = [], [], [], [], []
 for sd in ENS_SEEDS:
     wm_b, wm_c = train_ensemble(False, sd), train_ensemble(True, sd)         # same seed -> same init, fair pair
@@ -226,16 +242,21 @@ for sd in ENS_SEEDS:
 mar, rb_all, rc_all = np.array(mar), np.array(rb_all), np.array(rc_all)
 fb, fc = np.mean(fb_all, 0), np.mean(fc_all, 0)
 
-print(f"\n  control @H={H_EVAL}: baseline {rb_all.mean():.2f}+/-{sem(rb_all):.2f} | "
+competent = rb_all.mean() - rand.mean()                          # baseline-WM vs random (is the substrate controllable?)
+print(f"\n  competence: baseline-WM {rb_all.mean():.2f} vs random {rand.mean():.2f}  => "
+      f"{'CONTROLLABLE' if competent > 2 * np.hypot(sem(rb_all), sem(rand)) else 'WEAK (PushT trap -- A/B is moot)'}")
+print(f"  control @H={H_EVAL}: baseline {rb_all.mean():.2f}+/-{sem(rb_all):.2f} | "
       f"calibrated {rc_all.mean():.2f}+/-{sem(rc_all):.2f}")
 print(f"  MARGIN (calib - base): {mar.mean():+.2f} +/- {sem(mar):.2f}  ({mar.mean()/(sem(mar)+1e-9):+.1f} SEM over seeds)")
 print(f"  held-out fidelity@k=16: baseline {fb[-1]:.3f} | calibrated {fc[-1]:.3f}  "
-      f"({100*(fb[-1]-fc[-1])/fb[-1]:+.1f}% calib)  [baseline sane if << a no-op]")
+      f"({100*(fb[-1]-fc[-1])/fb[-1]:+.1f}% calib; bigger than Reacher's +3.6% => more model error to fix)")
 print(f"    base  fid curve {np.round(fb,2).tolist()}")
 print(f"    calib fid curve {np.round(fc,2).tolist()}")
-if mar.mean() > 2 * sem(mar) and mar.min() > 0:
-    print("  => POSITIVE (seeded): the calibration objective improves Reacher control across ALL seeds. The headline.")
+if competent <= 2 * np.hypot(sem(rb_all), sem(rand)):
+    print("  => INCONCLUSIVE: Pusher not controllable by this WM (too hard from pixels) -> A/B moot; easier-but-still-hard task.")
+elif mar.mean() > 2 * sem(mar) and mar.min() > 0:
+    print("  => POSITIVE (seeded): calibration improves control across ALL seeds, where there IS model error to fix. HEADLINE.")
 elif mar.mean() > sem(mar):
-    print("  => WEAK-POSITIVE: directional over seeds but within ~2 SEM; add seeds before claiming.")
+    print("  => WEAK-POSITIVE: directional over seeds but within ~2 SEM; add seeds.")
 else:
-    print("  => NULL (seeded): the single-seed margin did not survive seeding.")
+    print("  => NULL (seeded): even with more model error to fix, calibration does not translate to control. Control leg done.")
