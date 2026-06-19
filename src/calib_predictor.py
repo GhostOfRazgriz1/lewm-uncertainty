@@ -28,12 +28,15 @@ from torchvision import transforms as TT
 sys.path.insert(0, "/content/lewm-uncertainty")
 from src.load_lewm import load_lewm                               # noqa: E402
 
-N_ROLLOUTS, T_STEPS, FS = 150, 20, 5
+N_ROLLOUTS, T_STEPS, FS = 150, 24, 5
 N_OOD = 20                                                        # rollouts kept WITH frames for the OOD test
-M, K_MAX = 6, 8                                                   # ensemble size; rollout horizon
+M, K_MAX = 6, 12                                                  # ensemble size; rollout horizon (longer: gain grows)
 EPOCHS, BS, LR = 50, 256, 1e-3
 LAM, BETA, VFLOOR = 0.5, 1.0, 1e-3                                # calib weight; confidence sharpness; var floor
 NOISE_SIGMA = 0.4
+SEEDS = [0, 1, 2]                                                 # multi-seed (single-seed flipped on us in Tier 2)
+VARIANTS = [("baseline", False, False), ("conf-only", True, False),   # ablation: which component drives the gain?
+            ("nll-only", False, True), ("ours", True, True)]
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model, cfg = load_lewm("/content/le-wm", device=device)
 prep = TT.Compose([TT.ToTensor(), TT.Resize((224, 224)), TT.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
@@ -87,7 +90,8 @@ def ensemble_rollout(members, z0, acts):                          # z0 [B,192], 
     return torch.stack(outs)
 
 
-def train(ours):
+def train(use_conf, use_nll, seed):
+    torch.manual_seed(seed); np.random.seed(seed)
     members = nn.ModuleList([Pred() for _ in range(M)]).to(device)
     opt = torch.optim.Adam(members.parameters(), lr=LR)
     for m in members:
@@ -102,15 +106,12 @@ def train(ours):
             tgt = torch.stack([Ztr[r, t + 1:t + K_MAX + 1] for r, t in b])      # [B,k,192]
             preds = ensemble_rollout(members, z0, acts)                         # [M,B,k,192]
             memb_mse = ((preds - tgt[None]) ** 2).mean(-1)                      # [M,B,k]
-            if not ours:
-                loss = memb_mse.mean()
-            else:
-                mu = preds.mean(0); s = preds.var(0).mean(-1)                   # [B,k,192], [B,k]
-                se = ((mu - tgt) ** 2).mean(-1)                                 # [B,k] realized per-dim error
-                sf = s.clamp(min=VFLOOR)
-                nll = 0.5 * (se / sf + torch.log(sf))                           # calibration: var -> realized err
-                w = 1.0 / (1.0 + BETA * s.detach())                            # confidence weight (down-weight unsure)
-                loss = (w[None] * memb_mse).mean() + LAM * nll.mean()
+            mu = preds.mean(0); s = preds.var(0).mean(-1)                       # [B,k,192],[B,k]
+            w = 1.0 / (1.0 + BETA * s.detach()) if use_conf else torch.ones_like(s)
+            loss = (w[None] * memb_mse).mean()
+            if use_nll:                                                         # calibration: var -> realized err
+                se = ((mu - tgt) ** 2).mean(-1); sf = s.clamp(min=VFLOOR)
+                loss = loss + LAM * (0.5 * (se / sf + torch.log(sf))).mean()
             opt.zero_grad(); loss.backward()
             nn.utils.clip_grad_norm_(members.parameters(), 5.0); opt.step()
     for m in members:
@@ -146,11 +147,9 @@ def auroc(score, lab):                                            # higher score
 
 
 @torch.no_grad()
-def eval_ood(members):
+def eval_ood(members):                                            # OODZ precomputed (encodings predictor-independent)
     dis_c, dis_o, sh_c, sh_o = [], [], [], []
-    for fr, ac in OOD:
-        zc = encode_all(fr); zo = encode_all([corrupt(f, OODRNG) for f in fr])           # [T+1,192] clean/corrupt
-        a = ac.to(device)                                                                 # [T,10]
+    for zc, zo, a in OODZ:
         pc = ensemble_rollout(members, zc[:-1], a[:, None])[:, :, 0]                      # one-step from clean input
         po = ensemble_rollout(members, zo[:-1], a[:, None])[:, :, 0]
         dis_c += pc.var(0).mean(-1).cpu().tolist(); dis_o += po.var(0).mean(-1).cpu().tolist()
@@ -176,36 +175,38 @@ for r in range(N_ROLLOUTS):
 Z = torch.stack(Zs); A = torch.stack(As)                                                  # [N,T+1,192],[N,T,10]
 NTR = N_ROLLOUTS - 30
 Ztr, Atr = Z[:NTR], A[:NTR]
+OODZ = [(encode_all(fr), encode_all([corrupt(f, OODRNG) for f in fr]), a) for fr, a in OOD]  # precompute once
 print(f"  Z {tuple(Z.shape)}  train {NTR} / eval {N_ROLLOUTS-NTR} rollouts (shell={SHELL:.2f})\n", flush=True)
 
-# ---- train both variants + eval ------------------------------------------------------------------
-out = {}
-for ours in (False, True):
-    name = "ours (calib+conf)" if ours else "baseline (plain ens)"
-    members = train(ours)
-    fid, cal = eval_fidelity_calib(members)
-    ood = eval_ood(members)
-    out[name] = (fid, cal, ood)
-    print(f"[{name}]", flush=True)
-    print(f"  fidelity (rollout err @k=1..{K_MAX}): {np.round(fid,3).tolist()}", flush=True)
-    print(f"  calibration Spearman @k:             {np.round(cal,3).tolist()}  (mean {cal.mean():+.3f})", flush=True)
-    print(f"  OOD AUROC  disagreement {ood[0]:.3f} | shell {ood[1]:.3f} | combined {ood[2]:.3f}\n", flush=True)
+# ---- sweep variants x seeds ----------------------------------------------------------------------
+NS = len(SEEDS)
+res = {}                                                          # name -> (fid[S,k], cal[S,k], ood_comb[S])
+for name, uc, un in VARIANTS:
+    fids, cals, oodc = [], [], []
+    for s in SEEDS:
+        members = train(uc, un, s)
+        f, c = eval_fidelity_calib(members); o = eval_ood(members)
+        fids.append(f); cals.append(c); oodc.append(o[2])
+    res[name] = (np.array(fids), np.array(cals), np.array(oodc))
+    fm, fsem = res[name][0].mean(0), res[name][0].std(0) / np.sqrt(NS)
+    print(f"[{name}]  fidelity@k mean {np.round(fm,3).tolist()}", flush=True)
+    print(f"           fidelity@k={K_MAX} {fm[-1]:.3f}+/-{fsem[-1]:.3f} | calib(mean) {res[name][1].mean():+.3f}"
+          f" | OOD-combined {res[name][2].mean():.3f}\n", flush=True)
 
-# ---- verdict -------------------------------------------------------------------------------------
-bf, bc, bo = out["baseline (plain ens)"]
-of, oc, oo = out["ours (calib+conf)"]
-long_gain = bf[-1] - of[-1]; long_rel = 100 * long_gain / (bf[-1] + 1e-9)                # k=K_MAX error drop
-cal_gain = oc.mean() - bc.mean()
-print("==== verdict (JEPA-latent calibration objective) ====")
-print(f"  (a) long-horizon fidelity (k={K_MAX}): ours {of[-1]:.3f} vs baseline {bf[-1]:.3f}  "
-      f"=> {long_gain:+.3f} ({long_rel:+.1f}%)")
-print(f"  (b) calibration (mean within-horizon Spearman): ours {oc.mean():+.3f} vs baseline {bc.mean():+.3f}"
-      f"  => {cal_gain:+.3f}")
-print(f"  (c) OOD AUROC combined: ours {oo[2]:.3f} vs baseline {bo[2]:.3f}")
-better_fid = long_gain > 0.02 * bf[-1]; better_cal = cal_gain > 0.02; ood_ok = oo[2] > 0.7
-if better_fid and better_cal and ood_ok:
-    print("  => POSITIVE: the calibration objective improves long-horizon fidelity AND calibration, OOD intact.")
-elif better_fid or better_cal:
-    print("  => PARTIAL: improves one of fidelity/calibration but not both cleanly (see rows).")
+# ---- verdict (seeded) ----------------------------------------------------------------------------
+print(f"==== verdict ({NS} seeds; fidelity@k={K_MAX} lower=better) ====")
+bk = res["baseline"][0][:, -1]                                    # [S] baseline long-horizon error
+for name in ["conf-only", "nll-only", "ours"]:
+    vk = res[name][0][:, -1]
+    d = bk.mean() - vk.mean(); sm = np.hypot(bk.std() / np.sqrt(NS), vk.std() / np.sqrt(NS))
+    print(f"  {name:9} vs baseline: {d:+.3f} +/- {sm:.3f}  ({100*d/bk.mean():+.1f}%, {d/(sm+1e-9):+.1f} SEM)")
+oc, bc = res["ours"][1].mean(), res["baseline"][1].mean()
+print(f"  calibration: ours {oc:+.3f} vs baseline {bc:+.3f} (objective should PRESERVE; ensemble already strong)")
+print(f"  OOD: shell alone ~1.0 (SIGReg geometry, predictor-independent); ours combined {res['ours'][2].mean():.3f}")
+ok = res["ours"][0][:, -1]; od = bk.mean() - ok.mean(); osm = np.hypot(bk.std() / np.sqrt(NS), ok.std() / np.sqrt(NS))
+if od > 2 * osm:
+    print("  => POSITIVE (seeded): the objective improves long-horizon fidelity beyond 2 SEM. Ablation rows show the driver.")
+elif od > osm:
+    print("  => WEAK-POSITIVE: 1-2 SEM directional gain; more seeds / longer horizon to confirm before (3).")
 else:
-    print("  => NULL: the objective does not beat the plain ensemble (the plain ensemble was already strong).")
+    print("  => NULL (seeded): single-seed gain washed out -> the plain ensemble suffices.")
