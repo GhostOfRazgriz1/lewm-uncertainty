@@ -46,6 +46,24 @@ it passes → scope the full build (train a LeJEPA-style JEPA-WM on DMC pixels, 
 control/sample-efficiency à la WIMLE). If it fails → fall back to a clean-rendering pixel control env
 (Atari/ALE or a custom matplotlib reacher) — lower credibility, no infra rabbit hole.
 
+## (1) RESULT — objective locked (3 seeds, k=12)
+Plain **Gaussian-NLL on the SIGReg latent** is the objective. Two-axis mechanism win:
+- **long-horizon fidelity** +4.7% at k=12 (6.6 SEM), with a small ~4% short-horizon trade-off (net long win).
+- **scale-calibration** se/var 6.95 → 2.44 (toward 1.0) — the calibration axis, measured by scale not rank
+  (Spearman was saturated and missed it). OOD stays free from the shell (~1.0).
+- **Ablated negatives:** confidence-weighting (WIMLE port) does nothing; β-NLL attenuates the calibration
+  pressure and is dominated on every axis. So: plain NLL, no conf-weighting, no β.
+
+## (3) plan — JEPA-WM control on a tractable MuJoCo task
+Substrate decided by `dmc_smoke.py`: gymnasium MuJoCo renders on Colab. Use **`Reacher-v5`/`Pusher-v5`**
+(tractable — a small WM+CEM can actually control them), NOT hard locomotion (would repeat the PushT trap).
+- **(3a) control-competence pre-check** (`src/r_control_check.py`): train a minimal from-scratch JEPA-WM
+  (CNN encoder + anti-collapse + action-conditioned predictor + reward head) and CEM-plan to maximize
+  predicted reward. WIN = CEM ≫ random return → the substrate supports WM control → proceed. If CEM ≈
+  random, the WM/planner is too weak (PushT redux) → easier task / fix the WM before the objective test.
+- **(3b) the objective test** (after 3a passes): baseline WM vs **NLL-calibrated** WM (+ SIGReg Gaussian
+  latent so the NLL is principled), measure control return / sample efficiency à la WIMLE.
+
 ## Risks / honest scope
 - **Shaper risk:** Tier 2 (encoder shaping) was null — but that shaped the *encoder* for *static* pose; this
   shapes the *predictor* for *long-horizon rollout fidelity* (the localized target), predictor in the loop.
