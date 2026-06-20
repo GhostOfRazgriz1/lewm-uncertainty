@@ -153,34 +153,37 @@ def zsc(x):
 
 
 @torch.no_grad()
-def cem_action(enc, members, rew, frame, kappa, gen):          # DPP: rank by z(reward) - kappa*z(disagreement)
+def cem_action(enc, members, rew, frame, kappa, mu_t, sig_t, gen):   # SUPPORT-pessimistic DPP (the signal that's nonzero)
     z0 = enc(to_t([frame]))[0]
     mu = torch.zeros(H_PLAN, adim, device=device); sig = torch.ones(H_PLAN, adim, device=device)
-    last_u = 0.0
+    msup = mdis = 0.0
     for _ in range(CEM_ITERS):
         plans = (mu + sig * torch.randn(S_CEM, H_PLAN, adim, generator=gen, device=device)).clamp(-1, 1)
-        z = z0[None].expand(S_CEM, D).clone(); R = torch.zeros(S_CEM, device=device); U = torch.zeros(S_CEM, device=device)
+        z = z0[None].expand(S_CEM, D).clone(); R = torch.zeros(S_CEM, device=device)
+        Usup = torch.zeros(S_CEM, device=device); Udis = torch.zeros(S_CEM, device=device)
         for k in range(H_PLAN):
             preds = torch.stack([p(z, plans[:, k]) for p in members])            # [M,S,D]
-            z = preds.mean(0); U = U + preds.var(0).mean(-1); R = R + rew(z)
-        last_u = float(U.mean())
-        score = zsc(R) - kappa * zsc(U)
+            z = preds.mean(0); Udis = Udis + preds.var(0).mean(-1)               # disagreement (~0, kept for contrast)
+            Usup = Usup + (((z - mu_t) / sig_t) ** 2).mean(-1)                    # Mahalanobis-to-training-support (the OOD signal)
+            R = R + rew(z)
+        msup = float(Usup.mean()); mdis = float(Udis.mean())
+        score = zsc(R) - kappa * zsc(Usup)                                       # PENALIZE leaving the support
         elite = plans[score.argsort(descending=True)[:ELITE]]
         mu, sig = elite.mean(0), elite.std(0) + 1e-3
-    return mu[0].clamp(-1, 1).cpu().numpy(), last_u
+    return mu[0].clamp(-1, 1).cpu().numpy(), mdis, msup
 
 
 @torch.no_grad()
-def eval_return(enc, members, rew, kappa):
-    g = torch.Generator(device=device).manual_seed(0); rets, us = [], []
+def eval_return(enc, members, rew, kappa, mu_t, sig_t):
+    g = torch.Generator(device=device).manual_seed(0); rets, dis, sup = [], [], []
     for ep in range(EVAL_EP):
         env = gym.make(ENV_ID, render_mode="rgb_array"); env.reset(seed=30_000 + ep)
         R = 0.0; done = False
         while not done:
-            a, u = cem_action(enc, members, rew, render84(env), kappa, g); us.append(u)
+            a, ud, us = cem_action(enc, members, rew, render84(env), kappa, mu_t, sig_t, g); dis.append(ud); sup.append(us)
             _, r, term, trunc, _ = env.step(a.astype("float32")); R += float(r); done = term or trunc
         rets.append(R); env.close()
-    return np.array(rets), float(np.mean(us))
+    return np.array(rets), float(np.mean(dis)), float(np.mean(sup))
 
 
 @torch.no_grad()
@@ -202,45 +205,48 @@ POOL = collect(N_POOL, 0)
 rand = eval_random()
 print(f"random-action reference: {rand.mean():.1f} +/- {sem(rand):.1f}\n", flush=True)
 
-res, dis = {}, {}
+res, dmag, smag = {}, {}, {}
 for N in N_SWEEP:
     print(f"--- training data N={N} ---", flush=True)
     for kp in KAPPAS:
         res[(N, kp)] = []
-    dis[N] = []
+    dmag[N], smag[N] = [], []
     for sd in SEEDS:
         enc, rew = train_base(POOL[:N], sd)
         Z, A = encode_pool(enc, POOL[:N])
+        allz = torch.cat(list(Z)); mu_t = allz.mean(0); sig_t = allz.std(0) + 1e-6     # training-latent support stats
         members = train_bootstrap_ensemble(Z, A, sd)
         for kp in KAPPAS:
-            r, u = eval_return(enc, members, rew, kp)
+            r, ud, us = eval_return(enc, members, rew, kp, mu_t, sig_t)
             res[(N, kp)].append(r.mean())
             if kp == 0.0:
-                dis[N].append(u)
+                dmag[N].append(ud); smag[N].append(us)
         print(f"  seed {sd}: " + " | ".join(f"k={kp} {res[(N,kp)][-1]:.1f}" for kp in KAPPAS)
-              + f"  [disagreement {dis[N][-1]:.3f}]", flush=True)
+              + f"  [disag {dmag[N][-1]:.4f} | support {smag[N][-1]:.2f}]", flush=True)
     for kp in KAPPAS:
         res[(N, kp)] = np.array(res[(N, kp)])
 
 # ---- report + verdict ----------------------------------------------------------------------------
-print("\n==== DPP on Pusher: return by (data N, kappa), mean +/- SEM over seeds ====")
+print("\n==== DPP (support-pessimism) on Pusher: return by (data N, kappa), mean +/- SEM over seeds ====")
+print("   penalty = Mahalanobis-to-training-support (OOD facet, nonzero off-support); disag~0 = action-cond ensemble collapse")
 margins = {}
 for N in N_SWEEP:
     van = res[(N, 0.0)]
     print(f"  N={N:2d}: " + " | ".join(f"k={kp}: {res[(N,kp)].mean():.1f}+/-{sem(res[(N,kp)]):.1f}" for kp in KAPPAS)
-          + f"  | mean-disagreement {np.mean(dis[N]):.3f}  | competent vs random({rand.mean():.0f}): {van.mean()>rand.mean()+2*np.hypot(sem(van),sem(rand))}")
+          + f"  | support {np.mean(smag[N]):.2f} disag {np.mean(dmag[N]):.4f}"
+          + f"  | competent: {van.mean()>rand.mean()+2*np.hypot(sem(van),sem(rand))}")
     best = max([kp for kp in KAPPAS if kp > 0], key=lambda kp: res[(N, kp)].mean())
     d = res[(N, best)].mean() - van.mean(); s = np.hypot(sem(res[(N, best)]), sem(van))
     margins[N] = (d, s); print(f"        best DPP (k={best}) vs vanilla: {d:+.1f} +/- {s:.1f}  ({d/(s+1e-9):+.1f} SEM)")
 
 lo, hi = N_SWEEP[0], N_SWEEP[-1]
 print("\n  verdict:")
-if np.mean(dis[lo]) < 1e-3:
-    print("    => VACUOUS again: disagreement ~0 even with bootstrap+Pusher -> the ensemble can't produce usable")
-    print("       epistemic uncertainty here; DPP has no signal to act on. (A finding, not a refutation of pessimism.)")
+if np.mean(smag[lo]) < 1e-3:
+    print("    => VACUOUS: even the support signal is ~0 (unexpected) -- inspect mu_t/sig_t.")
 elif margins[lo][0] > 2 * margins[lo][1] and margins[lo][0] > margins[hi][0]:
-    print("    => POSITIVE: pessimism helps at LIMITED data and fades with data -- the reliability signature. The result.")
+    print("    => POSITIVE: support-pessimism helps at LIMITED data and fades with data -- the reliability signature.")
+    print("       (off-support is where the support facet becomes controller-relevant; matches the boundary-condition map.)")
 elif margins[lo][0] > 2 * margins[lo][1]:
-    print("    => POSITIVE (flat): DPP helps at low data; data-trend not clean.")
+    print("    => POSITIVE (flat): helps at low data; data-trend not clean.")
 else:
-    print("    => NULL: nonzero disagreement, but pessimism still doesn't improve control. Control leg truly done.")
+    print("    => NULL: nonzero support signal, but support-pessimism still doesn't improve control. Control leg done.")
