@@ -23,7 +23,7 @@ import cv2
 ENV_ID = "Pusher-v5"
 IMG, D, M = 84, 128, 5
 N_POOL, ENC_EPOCHS, ENS_EPOCHS, CLF_EPOCHS, BS, KSTEP = 70, 30, 50, 40, 64, 8
-N_SWEEP, SEEDS, KAP = [25, 70], [0, 1, 2, 3, 4], 3.0
+N_SWEEP, SEEDS, KAP = [25, 70], [0, 1, 2, 3, 4, 5, 6, 7], 3.0   # 8 seeds to confirm the +2.2-SEM 5-seed positive
 H_PLAN, S_CEM, CEM_ITERS, ELITE, EVAL_EP = 12, 256, 3, 26, 5
 device = "cuda" if torch.cuda.is_available() else "cpu"
 torch.manual_seed(0); np.random.seed(0)
@@ -174,6 +174,16 @@ def train_classifier(Z, A, seed):                               # density ratio 
 
 
 @torch.no_grad()
+def clf_auroc(clf, Z, A):                                        # did g learn (z,a) support? real vs shuffled-action
+    zc = torch.cat([Z[e][:-1] for e in range(len(Z))]); ac = torch.cat([A[e] for e in range(len(A))])
+    pos = clf(zc, ac).cpu().numpy()
+    neg = clf(zc, ac[torch.randperm(len(ac), device=device)]).cpu().numpy()
+    s = np.concatenate([pos, neg]); order = np.argsort(s); ranks = np.empty(len(s)); ranks[order] = np.arange(len(s))
+    npos = len(pos)
+    return float((ranks[:npos].sum() - npos * (npos - 1) / 2) / (npos * len(neg)))
+
+
+@torch.no_grad()
 def cem_action(enc, members, rew, clf, mu_t, sig_t, frame, kappa, mode, gen):
     z0 = enc(to_t([frame]))[0]
     mu = torch.zeros(H_PLAN, adim, device=device); sig = torch.ones(H_PLAN, adim, device=device)
@@ -212,19 +222,22 @@ env = gym.make(ENV_ID, render_mode="rgb_array"); env.reset(seed=0); adim = env.a
 print(f"=== {ENV_ID} adim {adim} ===  collecting {N_POOL} eps ...", flush=True)
 POOL = collect(N_POOL, 0)
 PLANNERS = [("vanilla", 0.0, "shell"), ("shell-pess", KAP, "shell"), ("joint-pess", KAP, "joint")]
-res = {}
+res, auroc = {}, {}
 for N in N_SWEEP:
     print(f"\n--- N={N} ---", flush=True)
     for name, _, _ in PLANNERS:
         res[(N, name)] = []
+    auroc[N] = []
     for sd in SEEDS:
         enc, rew = train_base(POOL[:N], sd)
         Z, A = encode_pool(enc, POOL[:N])
         allz = torch.cat(list(Z)); mu_t = allz.mean(0); sig_t = allz.std(0) + 1e-6
         members = train_ensemble(Z, A, sd); clf = train_classifier(Z, A, sd)
+        auroc[N].append(clf_auroc(clf, Z, A))
         for name, kp, mode in PLANNERS:
             res[(N, name)].append(eval_return(enc, members, rew, clf, mu_t, sig_t, kp, mode).mean())
-        print(f"  seed {sd}: " + " | ".join(f"{nm} {res[(N,nm)][-1]:.1f}" for nm, _, _ in PLANNERS), flush=True)
+        print(f"  seed {sd}: " + " | ".join(f"{nm} {res[(N,nm)][-1]:.1f}" for nm, _, _ in PLANNERS)
+              + f"  [clf AUROC {auroc[N][-1]:.2f}]", flush=True)
     for name, _, _ in PLANNERS:
         res[(N, name)] = np.array(res[(N, name)])
 
@@ -232,19 +245,24 @@ for N in N_SWEEP:
 print("\n==== #5 state-action vs state-shell support pessimism on Pusher (PAIRED delta vs vanilla) ====")
 for N in N_SWEEP:
     van = res[(N, "vanilla")]
-    print(f"  N={N:2d}: vanilla {van.mean():.1f}+/-{sem(van):.1f}")
+    print(f"  N={N:2d}: vanilla {van.mean():.1f}+/-{sem(van):.1f}  | clf AUROC {np.mean(auroc[N]):.2f} (>0.5 = learned (z,a) support)")
     for name in ("shell-pess", "joint-pess"):
         d = res[(N, name)] - van                                                 # paired per-seed delta
         print(f"        {name:11}: paired delta {d.mean():+.2f} +/- {sem(d):.2f}  ({d.mean()/(sem(d)+1e-9):+.1f} SEM)")
 
 lo = N_SWEEP[0]
 dj = res[(lo, "joint-pess")] - res[(lo, "vanilla")]; ds = res[(lo, "shell-pess")] - res[(lo, "vanilla")]
+clf_ok = np.mean(auroc[lo]) > 0.6
 print("\n  verdict:")
-if dj.mean() > 2 * sem(dj) and dj.mean() > ds.mean():
-    print("    => POSITIVE: STATE-ACTION support pessimism helps at limited data (>2 SEM) and beats state-shell")
-    print("       -- the support variable was the issue; control risk is in (z,a), not z. PROCEED to CUHL (#1).")
+if not clf_ok:
+    print(f"    => INVALID: clf AUROC {np.mean(auroc[lo]):.2f} ~ chance -> the (z,a) classifier didn't learn support;")
+    print("       the joint penalty is noise. Any 'effect' is spurious -- fix the classifier before trusting.")
+elif dj.mean() > 2 * sem(dj) and dj.mean() > ds.mean() + sem(ds):
+    print(f"    => CONFIRMED POSITIVE ({len(SEEDS)} seeds): STATE-ACTION support pessimism helps at limited data")
+    print("       (>2 SEM) and beats state-shell -- the DPP null was the WRONG support variable; control risk is in")
+    print("       (z,a), not z. The first surviving control-relevant positive. PROCEED to CUHL (#1) with (z,a) support.")
 elif dj.mean() > 2 * sem(dj):
-    print("    => POSITIVE (but ~= shell): joint helps but not clearly more than shell.")
+    print("    => POSITIVE but ~= shell: joint helps but not clearly more than shell (re-examine the contrast).")
 else:
-    print("    => NULL: state-action support pessimism also doesn't help -> support-pessimism is genuinely dead here;")
-    print("       CUHL's value would have to come from the HIERARCHY + action-free subgoal scoring, not (z,a) pessimism.")
+    print(f"    => WASHED at {len(SEEDS)} seeds: the 5-seed +2.2 SEM did not hold (5th inflation). Support-pessimism dead;")
+    print("       CUHL must earn its keep from the hierarchy + action-free subgoal scoring, not (z,a) pessimism.")
