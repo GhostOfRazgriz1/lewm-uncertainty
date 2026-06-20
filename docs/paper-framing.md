@@ -59,6 +59,14 @@ adaptive-horizon trust boundary (cleaner; sidesteps the negative-reward sign iss
 | long-horizon rollout eval | calibrated ensemble **wins** | predictive uncertainty actionable as monitor (M2.1/M2.2) |
 | limited-data / off-support planning | **FALSIFIED** — support-pessimism = no effect (5-seed paired, gradient N∈{25,45,70}, all within 2 SEM) | uncertainty does NOT become controller-relevant even off-support |
 
+**#5 (state-action support pessimism) also falsified, with a clean mechanism.** Penalizing unsupported
+`(z,a)` (a learned density-ratio) showed a 5-seed +9.2 (+2.2 SEM) "positive" that **washed at 8 seeds**
+(+2.2±2.2, +1.0 SEM) — the 5th low-seed inflation. The AUROC gate explains it: the `(z,a)` classifier never
+learned support (AUROC 0.56 ≈ chance), because our **random** behavior policy makes action independent of
+state (`a ⊥ z`), so there is no `(z,a)` support structure. State-action pessimism is undefined without
+structured offline data from a real policy. So *both* support variables (state-shell and state-action) fail
+for control here.
+
 **Verdict: the ambitious "controller off-support" claim is falsified; thesis lands firmly at MONITOR, NOT
 CONTROLLER (safe title).** DPP support-pessimism (the canonical offline-RL method) had a 3-seed apparent
 crossover (+4.97 @N=25) that **reversed under 5-seed paired testing** (−3.63 @N=25; curve [−3.6,−1.3,+0.1]) —
