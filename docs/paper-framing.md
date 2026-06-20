@@ -57,8 +57,14 @@ adaptive-horizon trust boundary (cleaner; sidesteps the negative-reward sign iss
 | full-data ID planning | uncertainty-control ≈ vanilla | no model-risk bottleneck (our 5 nulls) |
 | observation corruption / OOD perception | shell-gated trust **wins** | support uncertainty is actionable (A1) |
 | long-horizon rollout eval | calibrated ensemble **wins** | predictive uncertainty actionable as monitor (M2.1/M2.2) |
-| limited-data / off-support planning | pessimistic / trust-weighted planning **should win** | uncertainty becomes controller-relevant (DPP, running) |
-| if DPP still fails | thesis = "monitor, not controller" | coherent, weaker for the control framing |
+| limited-data / off-support planning | **FALSIFIED** — support-pessimism = no effect (5-seed paired, gradient N∈{25,45,70}, all within 2 SEM) | uncertainty does NOT become controller-relevant even off-support |
+
+**Verdict: the ambitious "controller off-support" claim is falsified; thesis lands firmly at MONITOR, NOT
+CONTROLLER (safe title).** DPP support-pessimism (the canonical offline-RL method) had a 3-seed apparent
+crossover (+4.97 @N=25) that **reversed under 5-seed paired testing** (−3.63 @N=25; curve [−3.6,−1.3,+0.1]) —
+the 4th low-seed inflation caught. Six control failures total; this last one is the strongest (principled
+method, favorable regime, proper stats). Claim 3 is now *strongly* evidenced: uncertainty is a monitor, and
+its inability to help control holds even where theory predicts it should.
 
 ## Key mechanistic finding (strengthens Claim 3)
 **Action-conditioned ensembles have ~0 epistemic disagreement.** M2.1's sharp ensemble uncertainty was
