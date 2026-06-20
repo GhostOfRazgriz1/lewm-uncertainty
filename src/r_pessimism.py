@@ -24,8 +24,8 @@ import cv2
 ENV_ID = "Pusher-v5"
 IMG, D, M = 84, 128, 5
 N_POOL, ENC_EPOCHS, ENS_EPOCHS, BS, KSTEP = 70, 30, 60, 64, 8
-N_SWEEP = [25, 70]                                               # limited vs ample training episodes
-SEEDS, KAPPAS = [0, 1, 2], [0.0, 1.0, 3.0]                       # kappa scale-free (z-scored); 0 = vanilla
+N_SWEEP = [25, 45, 70]                                           # reliability GRADIENT (for a clean crossover curve)
+SEEDS, KAPPAS = [0, 1, 2, 3, 4], [0.0, 3.0]                      # 5 seeds (PAIRED test -> tight); vanilla vs max-pessimism
 H_PLAN, S_CEM, CEM_ITERS, ELITE, EVAL_EP = 12, 256, 3, 26, 5
 device = "cuda" if torch.cuda.is_available() else "cpu"
 torch.manual_seed(0); np.random.seed(0)
@@ -227,26 +227,28 @@ for N in N_SWEEP:
         res[(N, kp)] = np.array(res[(N, kp)])
 
 # ---- report + verdict ----------------------------------------------------------------------------
-print("\n==== DPP (support-pessimism) on Pusher: return by (data N, kappa), mean +/- SEM over seeds ====")
-print("   penalty = Mahalanobis-to-training-support (OOD facet, nonzero off-support); disag~0 = action-cond ensemble collapse")
-margins = {}
+KV = max(KAPPAS)                                                 # pre-specified kappa for the verdict (no cherry-pick)
+print(f"\n==== DPP support-pessimism on Pusher: PAIRED per-seed delta(k={KV} - vanilla) vs data N ====")
+print("   PAIRED test: baseline & DPP share the per-seed WM, so use per-seed delta (unpaired SEM masks the effect).")
+print("   penalty = Mahalanobis-to-training-support; disag~0 = action-conditioned ensemble collapse.")
+curve = []
 for N in N_SWEEP:
-    van = res[(N, 0.0)]
-    print(f"  N={N:2d}: " + " | ".join(f"k={kp}: {res[(N,kp)].mean():.1f}+/-{sem(res[(N,kp)]):.1f}" for kp in KAPPAS)
-          + f"  | support {np.mean(smag[N]):.2f} disag {np.mean(dmag[N]):.4f}"
-          + f"  | competent: {van.mean()>rand.mean()+2*np.hypot(sem(van),sem(rand))}")
-    best = max([kp for kp in KAPPAS if kp > 0], key=lambda kp: res[(N, kp)].mean())
-    d = res[(N, best)].mean() - van.mean(); s = np.hypot(sem(res[(N, best)]), sem(van))
-    margins[N] = (d, s); print(f"        best DPP (k={best}) vs vanilla: {d:+.1f} +/- {s:.1f}  ({d/(s+1e-9):+.1f} SEM)")
+    van = res[(N, 0.0)]; comp = van.mean() - rand.mean()
+    delta = res[(N, KV)] - res[(N, 0.0)]                        # per-seed PAIRED delta (array over seeds)
+    curve.append((N, float(delta.mean()), sem(delta)))
+    print(f"  N={N:2d}: vanilla {van.mean():.1f}+/-{sem(van):.1f} (competent vs random: {comp>2*np.hypot(sem(van),sem(rand))}, {comp:+.1f})"
+          f" | support {np.mean(smag[N]):.2f} disag {np.mean(dmag[N]):.4f}"
+          f" | PAIRED delta {delta.mean():+.2f}+/-{sem(delta):.2f} ({delta.mean()/(sem(delta)+1e-9):+.1f} SEM)")
 
-lo, hi = N_SWEEP[0], N_SWEEP[-1]
-print("\n  verdict:")
-if np.mean(smag[lo]) < 1e-3:
-    print("    => VACUOUS: even the support signal is ~0 (unexpected) -- inspect mu_t/sig_t.")
-elif margins[lo][0] > 2 * margins[lo][1] and margins[lo][0] > margins[hi][0]:
-    print("    => POSITIVE: support-pessimism helps at LIMITED data and fades with data -- the reliability signature.")
-    print("       (off-support is where the support facet becomes controller-relevant; matches the boundary-condition map.)")
-elif margins[lo][0] > 2 * margins[lo][1]:
-    print("    => POSITIVE (flat): helps at low data; data-trend not clean.")
+lo, hi = curve[0], curve[-1]
+print(f"\n  crossover curve (paired delta by N): {[(n, round(d, 1)) for n, d, _ in curve]}")
+print("  verdict:")
+if np.mean(smag[N_SWEEP[0]]) < 1e-3:
+    print("    => VACUOUS: support signal ~0 (unexpected) -- inspect mu_t/sig_t.")
+elif lo[1] > 2 * lo[2] and hi[1] < lo[1]:
+    print("    => POSITIVE: support-pessimism HELPS at low data (>2 SEM, paired) and the benefit fades/reverses with")
+    print("       data -- the reliability crossover. Uncertainty becomes controller-relevant exactly off-support.")
+elif lo[1] > 2 * lo[2]:
+    print("    => POSITIVE (flat): helps at low data (paired >2 SEM); crossover curve not monotone.")
 else:
-    print("    => NULL: nonzero support signal, but support-pessimism still doesn't improve control. Control leg done.")
+    print("    => NULL: low-data paired delta within 2 SEM even paired -> not significant; control leg done.")
