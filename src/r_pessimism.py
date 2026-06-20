@@ -1,19 +1,16 @@
-"""OUR OWN ALGORITHM -- Disagreement-Pessimistic Planning (DPP) on a JEPA world model.
+"""OUR OWN ALGORITHM -- Disagreement-Pessimistic Planning (DPP), proper test.
 
-Our 5 control nulls all happened on FULL-DATA, IN-DIST, ~deterministic tasks -- exactly where uncertainty-
-aware control SHOULD fail (no OOD to avoid; penalizing uncertainty just biases toward predictable plans,
-M1.2's mechanism). Offline-RL theory says uncertainty-aware planning helps when the model is unreliable
-OFF-SUPPORT (limited data / shift). DPP tests that with the JEPA's free calibrated ensemble disagreement.
+First run was VACUOUS: on Reacher the ensemble disagreement was ~0 (too-easy dynamics + jointly-trained
+members converge), so kappa had zero effect -- not a test. This version fixes both: (a) BOOTSTRAP ensemble
+(each member on its own resample -> genuine off-support disagreement), (b) PUSHER (controllable + real model
+error), (c) a disagreement-magnitude DIAGNOSTIC so we see the signal is nonzero before trusting the verdict.
 
-DPP: CEM that maximizes a pessimistic objective  J = sum_k [ r_hat(z_k) - kappa * disagreement_k ]  -- it
-won't bank imagined reward in regions the ensemble is unsure about (where the WM is probably hallucinating).
-kappa=0 is vanilla CEM.
+DPP: CEM ranking plans by  z(sum reward) - kappa * z(sum disagreement)  (z-scored across candidates, so kappa
+is scale-free; kappa=0 = vanilla). Penalizes plans that bank imagined reward where the ensemble disagrees
+(the WM is probably hallucinating off-support).
 
-FALSIFIABLE PREDICTION (ties the 5 nulls into a mechanism): DPP beats vanilla when DATA IS LIMITED (WM
-unreliable off-support) and CONVERGES to vanilla when data is AMPLE (the M1.2/3b regime). So the DPP margin
-should SHRINK as training data grows -- that decay is the signature it's a real reliability effect.
-
-Test: Reacher, data sweep N in {LOW, HIGH} x seeds, kappa in {0, 1, 3}; real env return.
+PREDICTION: DPP beats vanilla at LIMITED data (WM unreliable off-support, disagreement informative) and fades
+at AMPLE data. WIN = margin > 2 SEM at low data AND shrinks with data, with NONZERO disagreement.
 Run on Colab GPU (pip install 'gymnasium[mujoco]' opencv-python-headless):  python src/r_pessimism.py
 """
 import os
@@ -24,12 +21,12 @@ import torch.nn as nn
 import gymnasium as gym
 import cv2
 
-ENV_ID = "Reacher-v5"
+ENV_ID = "Pusher-v5"
 IMG, D, M = 84, 128, 5
-N_POOL, ENC_EPOCHS, BS, KSTEP = 70, 40, 64, 8
-N_SWEEP = [20, 60]                                               # limited vs ample training episodes
-SEEDS, KAPPAS = [0, 1, 2], [0.0, 1.0, 3.0]                       # kappa=0 is vanilla CEM
-H_PLAN, S_CEM, CEM_ITERS, ELITE, EVAL_EP = 12, 256, 3, 26, 6
+N_POOL, ENC_EPOCHS, ENS_EPOCHS, BS, KSTEP = 70, 30, 60, 64, 8
+N_SWEEP = [25, 70]                                               # limited vs ample training episodes
+SEEDS, KAPPAS = [0, 1, 2], [0.0, 1.0, 3.0]                       # kappa scale-free (z-scored); 0 = vanilla
+H_PLAN, S_CEM, CEM_ITERS, ELITE, EVAL_EP = 12, 256, 3, 26, 5
 device = "cuda" if torch.cuda.is_available() else "cpu"
 torch.manual_seed(0); np.random.seed(0)
 
@@ -96,11 +93,10 @@ def sem(a):
     return float(np.std(a) / np.sqrt(len(a)))
 
 
-def train_wm(pool, seed):                                        # joint encoder + M-ensemble + reward head
+def train_base(pool, seed):                                     # encoder + reward head (+ a base predictor), then FREEZE
     torch.manual_seed(seed); np.random.seed(seed)
-    enc, rew = Encoder().to(device), RewardHead().to(device)
-    members = nn.ModuleList([Predictor(adim) for _ in range(M)]).to(device)
-    opt = torch.optim.Adam(list(enc.parameters()) + list(rew.parameters()) + list(members.parameters()), lr=3e-4)
+    enc, rew, p0 = Encoder().to(device), RewardHead().to(device), Predictor(adim).to(device)
+    opt = torch.optim.Adam(list(enc.parameters()) + list(rew.parameters()) + list(p0.parameters()), lr=3e-4)
     starts = [(e, t) for e in range(len(pool)) for t in range(len(pool[e][1]) - KSTEP)]
     for epoch in range(ENC_EPOCHS):
         np.random.shuffle(starts)
@@ -110,88 +106,141 @@ def train_wm(pool, seed):                                        # joint encoder
             ac = torch.tensor(np.stack([pool[e][1][t:t + KSTEP] for e, t in b]), device=device)
             rw_t = torch.tensor(np.stack([pool[e][2][t:t + KSTEP] for e, t in b]), device=device)
             zt = enc(fr.view(-1, 3, IMG, IMG)).view(len(b), KSTEP + 1, D)
-            lp = lr = 0.0
-            for p in members:
-                z = zt[:, 0]
-                for k in range(KSTEP):
-                    z = p(z, ac[:, k]); lp = lp + ((z - zt[:, k + 1]) ** 2).mean()
+            z = zt[:, 0]; lp = lr = 0.0
             for k in range(KSTEP):
-                lr = lr + ((rew(zt[:, k + 1]) - rw_t[:, k]) ** 2).mean()
-            loss = lp / (M * KSTEP) + lr / KSTEP + 0.5 * vicreg(zt[:, 0])
+                z = p0(z, ac[:, k]); lp = lp + ((z - zt[:, k + 1]) ** 2).mean(); lr = lr + ((rew(zt[:, k + 1]) - rw_t[:, k]) ** 2).mean()
+            loss = lp / KSTEP + lr / KSTEP + 0.5 * vicreg(zt[:, 0])
             opt.zero_grad(); loss.backward(); opt.step()
     enc.eval(); rew.eval()
-    for p in members:
-        p.eval()
-    return enc, members, rew
+    for p in list(enc.parameters()) + list(rew.parameters()):
+        p.requires_grad_(False)
+    return enc, rew
 
 
 @torch.no_grad()
-def cem_action(enc, members, rew, frame, kappa, gen):           # DPP: maximize sum_k [reward - kappa*disagreement]
+def encode_pool(enc, pool):
+    Z, A = [], []
+    for fr, ac, _ in pool:
+        z = [enc(to_t(fr[i:i + 64])) for i in range(0, len(fr), 64)]
+        Z.append(torch.cat(z)); A.append(torch.tensor(ac, device=device))
+    return Z, A
+
+
+def train_bootstrap_ensemble(Z, A, seed):                      # M predictors, each on its OWN bootstrap resample
+    torch.manual_seed(seed); np.random.seed(seed)
+    members = nn.ModuleList([Predictor(adim) for _ in range(M)]).to(device)
+    allstarts = [(e, t) for e in range(len(Z)) for t in range(len(A[e]) - KSTEP)]
+    for mi, p in enumerate(members):
+        opt = torch.optim.Adam(p.parameters(), lr=1e-3)
+        rng = np.random.default_rng(1000 * seed + mi)
+        boot = [allstarts[j] for j in rng.integers(0, len(allstarts), len(allstarts))]   # resample w/ replacement
+        for epoch in range(ENS_EPOCHS):
+            rng.shuffle(boot)
+            for i in range(0, len(boot), BS):
+                b = boot[i:i + BS]
+                z0 = torch.stack([Z[e][t] for e, t in b]); acts = torch.stack([A[e][t:t + KSTEP] for e, t in b])
+                tgt = torch.stack([Z[e][t + 1:t + KSTEP + 1] for e, t in b])
+                z = z0; loss = 0.0
+                for k in range(KSTEP):
+                    z = p(z, acts[:, k]); loss = loss + ((z - tgt[:, k]) ** 2).mean()
+                opt.zero_grad(); (loss / KSTEP).backward(); opt.step()
+        p.eval()
+    return members
+
+
+def zsc(x):
+    return (x - x.mean()) / (x.std() + 1e-9)
+
+
+@torch.no_grad()
+def cem_action(enc, members, rew, frame, kappa, gen):          # DPP: rank by z(reward) - kappa*z(disagreement)
     z0 = enc(to_t([frame]))[0]
     mu = torch.zeros(H_PLAN, adim, device=device); sig = torch.ones(H_PLAN, adim, device=device)
+    last_u = 0.0
     for _ in range(CEM_ITERS):
         plans = (mu + sig * torch.randn(S_CEM, H_PLAN, adim, generator=gen, device=device)).clamp(-1, 1)
-        z = z0[None].expand(S_CEM, D).clone(); ret = torch.zeros(S_CEM, device=device)
+        z = z0[None].expand(S_CEM, D).clone(); R = torch.zeros(S_CEM, device=device); U = torch.zeros(S_CEM, device=device)
         for k in range(H_PLAN):
-            preds = torch.stack([p(z, plans[:, k]) for p in members])        # [M,S,D]
-            z = preds.mean(0); u = preds.var(0).mean(-1)                      # [S,D],[S] disagreement
-            ret = ret + rew(z) - kappa * u
-        elite = plans[ret.argsort(descending=True)[:ELITE]]
+            preds = torch.stack([p(z, plans[:, k]) for p in members])            # [M,S,D]
+            z = preds.mean(0); U = U + preds.var(0).mean(-1); R = R + rew(z)
+        last_u = float(U.mean())
+        score = zsc(R) - kappa * zsc(U)
+        elite = plans[score.argsort(descending=True)[:ELITE]]
         mu, sig = elite.mean(0), elite.std(0) + 1e-3
-    return mu[0].clamp(-1, 1).cpu().numpy()
+    return mu[0].clamp(-1, 1).cpu().numpy(), last_u
 
 
 @torch.no_grad()
 def eval_return(enc, members, rew, kappa):
-    g = torch.Generator(device=device).manual_seed(0); rets = []
+    g = torch.Generator(device=device).manual_seed(0); rets, us = [], []
     for ep in range(EVAL_EP):
         env = gym.make(ENV_ID, render_mode="rgb_array"); env.reset(seed=30_000 + ep)
         R = 0.0; done = False
         while not done:
-            a = cem_action(enc, members, rew, render84(env), kappa, g).astype("float32")
-            _, r, term, trunc, _ = env.step(a); R += float(r); done = term or trunc
+            a, u = cem_action(enc, members, rew, render84(env), kappa, g); us.append(u)
+            _, r, term, trunc, _ = env.step(a.astype("float32")); R += float(r); done = term or trunc
+        rets.append(R); env.close()
+    return np.array(rets), float(np.mean(us))
+
+
+@torch.no_grad()
+def eval_random():
+    arng = np.random.default_rng(2); rets = []
+    for ep in range(EVAL_EP):
+        env = gym.make(ENV_ID, render_mode="rgb_array"); env.reset(seed=30_000 + ep)
+        R = 0.0; done = False
+        while not done:
+            _, r, term, trunc, _ = env.step(arng.uniform(-1, 1, adim).astype("float32")); R += float(r); done = term or trunc
         rets.append(R); env.close()
     return np.array(rets)
 
 
-# ---- data + sweep --------------------------------------------------------------------------------
+# ---- run -----------------------------------------------------------------------------------------
 env = gym.make(ENV_ID, render_mode="rgb_array"); env.reset(seed=0); adim = env.action_space.shape[0]; env.close()
 print(f"=== {ENV_ID} adim {adim} ===  collecting pool of {N_POOL} eps ...", flush=True)
 POOL = collect(N_POOL, 0)
+rand = eval_random()
+print(f"random-action reference: {rand.mean():.1f} +/- {sem(rand):.1f}\n", flush=True)
 
-res = {}                                                         # (N, kappa) -> per-seed mean returns
+res, dis = {}, {}
 for N in N_SWEEP:
-    print(f"\n--- training data N={N} episodes ---", flush=True)
+    print(f"--- training data N={N} ---", flush=True)
     for kp in KAPPAS:
         res[(N, kp)] = []
+    dis[N] = []
     for sd in SEEDS:
-        enc, members, rew = train_wm(POOL[:N], sd)
+        enc, rew = train_base(POOL[:N], sd)
+        Z, A = encode_pool(enc, POOL[:N])
+        members = train_bootstrap_ensemble(Z, A, sd)
         for kp in KAPPAS:
-            res[(N, kp)].append(eval_return(enc, members, rew, kp).mean())
-        print(f"  seed {sd}: " + " | ".join(f"k={kp} {res[(N,kp)][-1]:.1f}" for kp in KAPPAS), flush=True)
+            r, u = eval_return(enc, members, rew, kp)
+            res[(N, kp)].append(r.mean())
+            if kp == 0.0:
+                dis[N].append(u)
+        print(f"  seed {sd}: " + " | ".join(f"k={kp} {res[(N,kp)][-1]:.1f}" for kp in KAPPAS)
+              + f"  [disagreement {dis[N][-1]:.3f}]", flush=True)
     for kp in KAPPAS:
         res[(N, kp)] = np.array(res[(N, kp)])
 
 # ---- report + verdict ----------------------------------------------------------------------------
-print("\n==== DPP: return by (data N, kappa) -- mean +/- SEM over seeds (higher=better) ====")
+print("\n==== DPP on Pusher: return by (data N, kappa), mean +/- SEM over seeds ====")
 margins = {}
 for N in N_SWEEP:
     van = res[(N, 0.0)]
-    line = " | ".join(f"k={kp}: {res[(N,kp)].mean():.1f}+/-{sem(res[(N,kp)]):.1f}" for kp in KAPPAS)
-    best_kp = max([kp for kp in KAPPAS if kp > 0], key=lambda kp: res[(N, kp)].mean())
-    d = res[(N, best_kp)].mean() - van.mean(); s = np.hypot(sem(res[(N, best_kp)]), sem(van))
-    margins[N] = (d, s)
-    print(f"  N={N:2d}: {line}")
-    print(f"        best DPP (k={best_kp}) vs vanilla (k=0): {d:+.1f} +/- {s:.1f}  ({d/(s+1e-9):+.1f} SEM)")
+    print(f"  N={N:2d}: " + " | ".join(f"k={kp}: {res[(N,kp)].mean():.1f}+/-{sem(res[(N,kp)]):.1f}" for kp in KAPPAS)
+          + f"  | mean-disagreement {np.mean(dis[N]):.3f}  | competent vs random({rand.mean():.0f}): {van.mean()>rand.mean()+2*np.hypot(sem(van),sem(rand))}")
+    best = max([kp for kp in KAPPAS if kp > 0], key=lambda kp: res[(N, kp)].mean())
+    d = res[(N, best)].mean() - van.mean(); s = np.hypot(sem(res[(N, best)]), sem(van))
+    margins[N] = (d, s); print(f"        best DPP (k={best}) vs vanilla: {d:+.1f} +/- {s:.1f}  ({d/(s+1e-9):+.1f} SEM)")
 
 lo, hi = N_SWEEP[0], N_SWEEP[-1]
-shrinks = margins[lo][0] > margins[hi][0]
 print("\n  verdict:")
-print(f"    DPP margin: N={lo} {margins[lo][0]:+.1f}  ->  N={hi} {margins[hi][0]:+.1f}  (shrinks with data: {shrinks})")
-if margins[lo][0] > 2 * margins[lo][1] and shrinks:
-    print("    => POSITIVE: pessimism helps in the LIMITED-data regime and fades with data -- the reliability")
-    print("       signature. Uncertainty-aware control works exactly where the model is unreliable. The result.")
+if np.mean(dis[lo]) < 1e-3:
+    print("    => VACUOUS again: disagreement ~0 even with bootstrap+Pusher -> the ensemble can't produce usable")
+    print("       epistemic uncertainty here; DPP has no signal to act on. (A finding, not a refutation of pessimism.)")
+elif margins[lo][0] > 2 * margins[lo][1] and margins[lo][0] > margins[hi][0]:
+    print("    => POSITIVE: pessimism helps at LIMITED data and fades with data -- the reliability signature. The result.")
 elif margins[lo][0] > 2 * margins[lo][1]:
-    print("    => POSITIVE (flat): DPP helps at low data but the data-trend isn't clean.")
+    print("    => POSITIVE (flat): DPP helps at low data; data-trend not clean.")
 else:
-    print("    => NULL: pessimism does not help even at low data -> the disagreement signal isn't actionable here either.")
+    print("    => NULL: nonzero disagreement, but pessimism still doesn't improve control. Control leg truly done.")
