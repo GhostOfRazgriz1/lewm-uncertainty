@@ -59,13 +59,29 @@ adaptive-horizon trust boundary (cleaner; sidesteps the negative-reward sign iss
 | long-horizon rollout eval | calibrated ensemble **wins** | predictive uncertainty actionable as monitor (M2.1/M2.2) |
 | limited-data / off-support planning | **FALSIFIED** — support-pessimism = no effect (5-seed paired, gradient N∈{25,45,70}, all within 2 SEM) | uncertainty does NOT become controller-relevant even off-support |
 
-**#5 (state-action support pessimism) also falsified, with a clean mechanism.** Penalizing unsupported
-`(z,a)` (a learned density-ratio) showed a 5-seed +9.2 (+2.2 SEM) "positive" that **washed at 8 seeds**
-(+2.2±2.2, +1.0 SEM) — the 5th low-seed inflation. The AUROC gate explains it: the `(z,a)` classifier never
-learned support (AUROC 0.56 ≈ chance), because our **random** behavior policy makes action independent of
-state (`a ⊥ z`), so there is no `(z,a)` support structure. State-action pessimism is undefined without
-structured offline data from a real policy. So *both* support variables (state-shell and state-action) fail
-for control here.
+**#5 (state-action support pessimism) — UNIDENTIFIABLE under random data, not "failed" (a loophole-closing
+diagnostic).** This closes the "maybe risk lives in `(z,a)`, not `z`" loophole with a clean theorem, not a
+mere null. The density-ratio learns `p_D(z_t,a_t)` vs shuffled `p_D(z_t)p_D(a_t)`; but our **random** behavior
+policy gives `a ⊥ z`, so `p_D(z,a)=p_D(z)p_D(a)` ⟹ `p_real/p_shuf ≡ 1` ⟹ optimal `g*≡0` ⟹ AUROC=0.5.
+Observed AUROC **0.56 ≈ chance** confirms it; the 5-seed +9.2 (+2.2 SEM) "gain" was seed noise on a noise
+penalty (washed to +1.0 SEM at 8 seeds — 5th inflation). **It does NOT falsify state-action pessimism in
+general — only in the random-exploration regime.** Honest statement: *state-action support pessimism requires
+behavior-policy structure; random exploration destroys the signal pessimism needs.*
+
+**Refined boundary condition (sharper than "off-support").** JEPA uncertainty becomes controller-relevant
+only when there is a **learnable support boundary in the latent state-action occupancy**. Limited data is not
+enough; the data must have *structured* support.
+
+**Two gates before any control claim counts (generalizing the AUROC gate that just saved us):**
+- Gate 1 — *identifiability*: `AUROC(support model) > 0.7` against meaningful negatives (planner-proposed, not
+  just shuffled).
+- Gate 2 — *relevance*: `corr(support score, rollout error) > 0`.
+
+**Open escape-hatch experiment (the principled next test, if pursued):** collect a *structured* offline
+dataset (mixture behavior policy: scripted-to-goal + noisy + suboptimal modes), train a support model
+(behavior-cloning likelihood `−log π_β(a|z)`, or density-ratio with **planner-proposed** negatives), pass
+both gates, then test pessimistic planning `J = d(ẑ_H,z_g) + λ Σ c(ẑ_t,a_t)`. This is the cleanest possible
+test of "support improves planning" — it fixes the exact identifiability flaw that made #5 untestable.
 
 **Verdict: the ambitious "controller off-support" claim is falsified; thesis lands firmly at MONITOR, NOT
 CONTROLLER (safe title).** DPP support-pessimism (the canonical offline-RL method) had a 3-seed apparent
