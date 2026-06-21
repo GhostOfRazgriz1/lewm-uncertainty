@@ -1,15 +1,17 @@
-"""GATE 2 -- is the (z,a) support score RELEVANT to model risk? (after Gate 1 OPEN)
+"""GATE 2 -- is the (z,a) support score RELEVANT to model risk? (v2: INLINE branching; v1 set_state was unfaithful)
 
-Gate 1: structured data makes (z,a) support identifiable (AUROC 0.85 vs random 0.50). But identifiable isn't
-enough for pessimism -- the support score must predict WHERE THE MODEL IS WRONG. Gate 2 tests:
-  corr( U(z,a) = -g(z,a) ,  model error e(z,a) )  > 0 ?
-across in-support (data) AND off-support (random) actions. The off-support ground truth needs the REAL next
-state for actions the data never took -> we reset the sim (recorded qpos/qvel) to each state and execute the
-action to get the true next frame, then compare to the model's prediction.
+Gate 1 OPEN: structured data makes (z,a) support identifiable (AUROC 0.85 vs random 0.50). Gate 2: does the
+support score predict WHERE THE MODEL IS WRONG?  corr( U(z,a)=-g(z,a) , true 1-step model error ) > 0 ?
 
-PASS (corr>0, off-support actions have higher U AND higher error) => support is relevant to model risk =>
-pessimism has a real target => proceed to the structured-offline control test. FAIL (corr~0) => support is
-identifiable but irrelevant to where the model fails => pessimism won't help; ship the monitor paper.
+v1 was INVALID: resetting a separate env (seed=0) to states from other episodes didn't restore Pusher's goal
+(round-trip ||dz|| ~13). v2 fixes it by BRANCHING WITHIN THE SAME EPISODE'S ENV: roll the structured policy;
+at probe steps, snapshot (qpos,qvel), try the data action + several off-support (random) actions via
+set_state->step (same env/goal, so the reset is faithful), then restore and continue. Reports a round-trip
+sanity (set_state with no step should re-render to ~the same latent).
+
+PASS (corr>0 beyond SEM; off-support actions have higher U AND higher error) => support relevant to model
+risk => both gates pass => proceed to the structured-offline control test. FAIL (corr~0) => identifiable but
+irrelevant => ship the monitor paper.
 Run on Colab GPU (pip install 'gymnasium[mujoco]' opencv-python-headless):  python src/gate2_relevance.py
 """
 import os
@@ -23,7 +25,7 @@ import cv2
 ENV_ID = "Pusher-v5"
 IMG, D = 84, 128
 N_DATA, ENC_EPOCHS, CLF_EPOCHS, BS, KSTEP = 40, 30, 40, 64, 8
-SEEDS, N_STATES, N_OFF = [0, 1, 2], 40, 5                        # held-out states x (1 data + N_OFF random) actions
+SEEDS, N_EVAL_EP, PROBE_EVERY, N_OFF = [0, 1, 2], 4, 10, 5
 device = "cuda" if torch.cuda.is_available() else "cpu"
 torch.manual_seed(0); np.random.seed(0)
 
@@ -72,23 +74,15 @@ def vicreg(z):
     return var + 0.04 * (cov - torch.diag(torch.diag(cov))).pow(2).sum() / D
 
 
-def get_state(env):
-    return env.unwrapped.data.qpos.copy(), env.unwrapped.data.qvel.copy()
-
-
-def set_state(env, qpos, qvel):
-    env.unwrapped.set_state(qpos, qvel)
-
-
-def collect(n_ep, seed0, policy):                               # records frames, actions, AND (qpos,qvel) for reset
+def collect(n_ep, seed0, policy):
     eps = []
     for ep in range(n_ep):
         env = gym.make(ENV_ID, render_mode="rgb_array"); obs, info = env.reset(seed=seed0 + ep)
-        fr = [render84(env)]; ac = []; st = [get_state(env)]; done = False
+        fr = [render84(env)]; ac = []; done = False
         while not done:
             a = policy(obs).astype("float32"); obs, r, term, trunc, info = env.step(a)
-            fr.append(render84(env)); ac.append(a); st.append(get_state(env)); done = term or trunc
-        eps.append((np.stack(fr), np.stack(ac), st)); env.close()
+            fr.append(render84(env)); ac.append(a); done = term or trunc
+        eps.append((np.stack(fr), np.stack(ac))); env.close()
     return eps
 
 
@@ -120,8 +114,8 @@ def train_encoder(pool, seed):
 def train_classifier(pool, enc, seed):
     torch.manual_seed(seed + 99)
     with torch.no_grad():
-        Z = torch.cat([torch.cat([enc(to_t(fr[i:i + 64])) for i in range(0, len(fr), 64)])[:-1] for fr, _, _ in pool])
-        A = torch.cat([torch.tensor(ac, device=device) for _, ac, _ in pool])
+        Z = torch.cat([torch.cat([enc(to_t(fr[i:i + 64])) for i in range(0, len(fr), 64)])[:-1] for fr, _ in pool])
+        A = torch.cat([torch.tensor(ac, device=device) for _, ac in pool])
     clf = Classifier(adim).to(device); opt = torch.optim.Adam(clf.parameters(), lr=1e-3); bce = nn.BCEWithLogitsLoss()
     for epoch in range(CLF_EPOCHS):
         perm = torch.randperm(len(Z), device=device)
@@ -141,30 +135,29 @@ def spearman(x, y):
 
 
 @torch.no_grad()
-def gate2_eval(enc, p0, clf, pool, seed):                       # corr(support U, true model error e) over data+off actions
-    rng = np.random.default_rng(seed + 7); env = gym.make(ENV_ID, render_mode="rgb_array"); env.reset(seed=0)
-    Us, Es, kinds = [], [], []
-    rt_err = []                                                 # set_state round-trip sanity (encode(set)-recorded)
-    picks = [(e, t) for e in range(len(pool)) for t in range(len(pool[e][1]))]
-    for e, t in [picks[i] for i in rng.choice(len(picks), min(N_STATES, len(picks)), replace=False)]:
-        qpos, qvel = pool[e][2][t]
-        set_state(env, qpos, qvel)
-        z_t = encode_one(enc, render84(env))
-        rt_err.append(float((z_t - encode_one(enc, pool[e][0][t])).norm()))     # should be ~0 if reset round-trips
-        a_data = pool[e][1][t] if t < len(pool[e][1]) else rng.uniform(-1, 1, adim).astype("float32")
-        cand = [("data", a_data)] + [("off", rng.uniform(-1, 1, adim).astype("float32")) for _ in range(N_OFF)]
-        for kind, a in cand:
-            at = torch.tensor(a, dtype=torch.float32, device=device)
-            U = float(-clf(z_t[None], at[None])[0])                              # support risk (high = off-support)
-            set_state(env, qpos, qvel); env.step(np.asarray(a, dtype="float32"))
-            z_next_real = encode_one(enc, render84(env))
-            e_model = float((p0(z_t[None], at[None])[0] - z_next_real).norm())   # true 1-step model error
-            Us.append(U); Es.append(e_model); kinds.append(kind)
+def gate2_eval(enc, p0, clf, pol, seed):                        # INLINE branching: same env/goal -> faithful set_state
+    rng = np.random.default_rng(seed + 7); env = gym.make(ENV_ID, render_mode="rgb_array")
+    Us, Es, kinds, rts = [], [], [], []
+    for ep in range(N_EVAL_EP):
+        obs, info = env.reset(seed=9000 + ep); done = False; step = 0
+        while not done:
+            a_taken = pol(obs).astype("float32")
+            if step % PROBE_EVERY == 0:
+                z_t = encode_one(enc, render84(env))
+                qpos, qvel = env.unwrapped.data.qpos.copy(), env.unwrapped.data.qvel.copy()
+                env.unwrapped.set_state(qpos, qvel)                              # no-step round-trip sanity
+                rts.append(float((encode_one(enc, render84(env)) - z_t).norm()))
+                cands = [("data", a_taken)] + [("off", rng.uniform(-1, 1, adim).astype("float32")) for _ in range(N_OFF)]
+                for kind, a in cands:
+                    env.unwrapped.set_state(qpos, qvel); env.step(a)
+                    z_next = encode_one(enc, render84(env)); at = torch.tensor(a, dtype=torch.float32, device=device)
+                    Us.append(float(-clf(z_t[None], at[None])[0]))
+                    Es.append(float((p0(z_t[None], at[None])[0] - z_next).norm())); kinds.append(kind)
+                env.unwrapped.set_state(qpos, qvel)                              # restore to continue the trajectory
+            obs, r, term, trunc, info = env.step(a_taken); done = term or trunc; step += 1
     env.close()
-    Us, Es, kinds = np.array(Us), np.array(Es), np.array(kinds)
-    corr = spearman(Us, Es)
-    d = kinds == "data"
-    return corr, float(np.mean(rt_err)), (Us[d].mean(), Es[d].mean()), (Us[~d].mean(), Es[~d].mean())
+    Us, Es, kinds = np.array(Us), np.array(Es), np.array(kinds); d = kinds == "data"
+    return spearman(Us, Es), float(np.mean(rts)), (Us[d].mean(), Es[d].mean()), (Us[~d].mean(), Es[~d].mean())
 
 
 def sem(a):
@@ -179,7 +172,7 @@ for _ in range(500):
     if term or trunc:
         env.reset()
 env.close()
-OM, OS = obss[0] * 0 + np.stack(obss).mean(0), np.stack(obss).std(0) + 1e-6
+OM, OS = np.stack(obss).mean(0), np.stack(obss).std(0) + 1e-6
 print(f"=== {ENV_ID} adim {adim} obs_dim {obs_dim} ===", flush=True)
 
 
@@ -192,23 +185,24 @@ def structured_policy(seed):
 # ---- run -----------------------------------------------------------------------------------------
 corrs, rts = [], []
 for sd in SEEDS:
-    pool = collect(N_DATA, sd, structured_policy(sd))
+    pol = structured_policy(sd)
+    pool = collect(N_DATA, sd, pol)
     enc, p0 = train_encoder(pool, sd); clf = train_classifier(pool, enc, sd)
-    corr, rt, (ud, ed), (uo, eo) = gate2_eval(enc, p0, clf, pool, sd)
+    corr, rt, (ud, ed), (uo, eo) = gate2_eval(enc, p0, clf, structured_policy(sd), sd)
     corrs.append(corr); rts.append(rt)
     print(f"  seed {sd}: corr(U,err) {corr:+.3f} | data(U {ud:+.2f},e {ed:.2f}) off(U {uo:+.2f},e {eo:.2f})"
-          f" | reset round-trip ||dz|| {rt:.3f}", flush=True)
+          f" | round-trip ||dz|| {rt:.3f}", flush=True)
 corrs = np.array(corrs)
 
 print("\n==== Gate 2: is (z,a) support relevant to model error? ====")
 print(f"  Spearman corr(support U, true 1-step model error): {corrs.mean():+.3f} +/- {sem(corrs):.3f}")
-print(f"  reset round-trip ||dz|| (should be small): {np.mean(rts):.3f}")
+print(f"  reset round-trip ||dz|| (must be small for validity): {np.mean(rts):.3f}")
 print("\n  verdict:")
 if np.mean(rts) > 2.0:
-    print("    => INVALID: set_state round-trip is large -> sim reset not faithful; model-error eval unreliable.")
+    print("    => INVALID: set_state round-trip still large -> even inline reset unfaithful; need a different eval.")
 elif corrs.mean() > 2 * sem(corrs) and corrs.mean() > 0.1:
-    print("    => PASS: off-support (z,a) reliably has higher model error -> support score is RELEVANT to model")
-    print("       risk. Both gates pass -> proceed to the structured-offline pessimistic-control test.")
+    print("    => PASS: off-support (z,a) reliably has higher model error -> support is RELEVANT to model risk.")
+    print("       Both gates pass -> proceed to the structured-offline pessimistic-control test.")
 else:
     print("    => FAIL: support is identifiable (Gate 1) but NOT predictive of where the model errs -> pessimism")
-    print("       has no real target. Support-pessimism won't help control; ship the monitor paper.")
+    print("       has no real target. Ship the monitor paper.")
