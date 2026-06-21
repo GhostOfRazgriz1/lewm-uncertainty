@@ -5,9 +5,18 @@ data; do not claim "uncertainty improves JEPA control in general" (our results f
 in-distribution tasks).*
 
 ## Title
-- Safe: **Calibrated Uncertainty in JEPA World Models: Separating Latent Support from Predictive Risk**
-- Ambitious (only if off-support/DPP gives a real planning win): **When Should a JEPA World Model Trust Its
-  Imagination? Calibrated Latent Uncertainty for Robust Long-Horizon Planning**
+- **EARNED (ambitious): When Should a JEPA World Model Trust Its Imagination? Calibrated Latent Uncertainty
+  for Robust Long-Horizon Planning** — the control win (below) earns this.
+- Fallback (safe): Calibrated Uncertainty in JEPA World Models: Separating Latent Support from Predictive Risk
+
+## THE CONTROL RESULT (confirmed, 10-seed paired, verified signal)
+Support-pessimistic CEM beats vanilla CEM on **structured-offline** data where `(z,a)` support is identifiable
+(Gate 1) and relevant (Gate 2): paired delta **+4.33 ± 1.17 (+3.7 SEM), 9/10 seeds positive**, vanilla beats
+random by +13.1 (clean competence), classifier AUROC 0.95. It is a REAL effect, not a 6th inflation: the mean
+held while SEM shrank from the 5→10-seed bump (+4.64→+4.33), the opposite of every washed prior positive.
+Full causal chain: theorem (random data ⟹ AUROC 0.5) → Gate 1 (structured ⟹ identifiable 0.85) → Gate 2
+(relevant, corr +0.21) → control (+3.7 SEM). The six earlier control nulls are the BOUNDARY (in-dist /
+random-data, support unidentifiable or irrelevant); this is where it flips positive.
 
 ## Thesis
 JEPA world models expose **two geometrically distinct uncertainty facets** — *latent support* uncertainty
@@ -83,8 +92,13 @@ dataset (mixture behavior policy: scripted-to-goal + noisy + suboptimal modes), 
 both gates, then test pessimistic planning `J = d(ẑ_H,z_g) + λ Σ c(ẑ_t,a_t)`. This is the cleanest possible
 test of "support improves planning" — it fixes the exact identifiability flaw that made #5 untestable.
 
-**Verdict: the ambitious "controller off-support" claim is falsified; thesis lands firmly at MONITOR, NOT
-CONTROLLER (safe title).** DPP support-pessimism (the canonical offline-RL method) had a 3-seed apparent
+**Verdict (UPDATED after the structured-offline control win): MONITOR everywhere, AND CONTROLLER under a
+precise, verified condition** — when `(z,a)` support is *identifiable AND relevant* (structured data; both
+gates pass), support-pessimistic planning improves control (+3.7 SEM, 9/10 seeds). The earlier "off-support"
+falsifications (DPP/#5) were in regimes where support was *unidentifiable* (random data, `a⊥z`) or the wrong
+variable (state-shell); they define the boundary, not a blanket negative. The ambitious title is earned.
+**Old (now superseded):** the ambitious "controller off-support" claim looked falsified — until we separated
+"off-support" into identifiable-vs-not. Limited data alone isn't enough; structured support is. DPP support-pessimism (the canonical offline-RL method) had a 3-seed apparent
 crossover (+4.97 @N=25) that **reversed under 5-seed paired testing** (−3.63 @N=25; curve [−3.6,−1.3,+0.1]) —
 the 4th low-seed inflation caught. Six control failures total; this last one is the strongest (principled
 method, favorable regime, proper stats). Claim 3 is now *strongly* evidenced: uncertainty is a monitor, and
